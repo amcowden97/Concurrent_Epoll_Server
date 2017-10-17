@@ -112,7 +112,7 @@ int setup_socket(char *wanted_address){
 	
 	if(sockfd < 0){
 		fputs("Unable to Create the Socket from System Call\n", stderr);
-		return EXIT_FAILURE;
+		exit(EXIT_FAILURE);
 	}
 	
 	//Address Initialization
@@ -125,7 +125,7 @@ int setup_socket(char *wanted_address){
     int connect_result = connect(sockfd, (struct sockaddr *) &address, sizeof(address));
 	if(connect_result == -1){
         fputs("Unable to Connect the Address with the Specified Socket\n", stderr);
-        return EXIT_FAILURE;
+		exit(EXIT_FAILURE);
     }
 	return sockfd;
 }
