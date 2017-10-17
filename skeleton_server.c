@@ -1,7 +1,6 @@
 #define _XOPEN_SOURCE 600
-#define _POSIX_C_SOURCE >= 199309L
-#include <sys/types.h>
-#include <sys/socket.h>
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -13,12 +12,15 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <sys/epoll.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <pthread.h>
 #include <time.h>
 #include "readline.c"
 
 #define MAX_BUFF 4024
-#define MAX_TIME_IMPL 30
+#define MAX_TIME_IMPL 2
 #define MAX_CLIENTS 100000
 #define PORT 4070
 #define SECRET "cs407rembash"
@@ -37,6 +39,7 @@ int verify_rembash(int connect_fd);
 void handle_bash(char *slave_name);
 int open_pty_master(char *slave_name);
 int transfer_data(int read_fd, int write_fd);
+void timer_sig_handler(int sig);
 
 
 int main(){
@@ -157,7 +160,7 @@ void *handle_client(void *arg){
 	
 	//Verify Valid Client
 	if(verify_rembash(connect_fd) == EXIT_FAILURE){
-		fputs("Critical Rembash Error\n", stderr);
+		fputs("Unable to Connect Client\n", stderr);
 		close(connect_fd);
 		pthread_exit(NULL);
 	}
@@ -224,7 +227,7 @@ int verify_rembash(int connect_fd){
 	
 	//Timer Variables
 	timer_t timer_id;
-	struct sigevent signal_ev;
+	struct sigevent sev;
 	struct itimerspec time_specs;
 
 	//Rembash Send
@@ -239,28 +242,28 @@ int verify_rembash(int connect_fd){
 	memset(&response, 0, sizeof(response));
 	response.sa_handler = timer_sig_handler;
 	sigemptyset(&response.sa_mask);
-	sigaction(TIMER_SIG, &response, NULL);
+	sigaction(SIGALRM, &response, NULL);
 
 	//Create POSIX Timer
 	sev.sigev_notify = SIGEV_THREAD_ID;
-	sev.sigev_signo = TIMER_SIG;
-	sev.sigev_value.sival_ptr = &timerid;
+	sev.sigev_signo = SIGALRM;
+	sev.sigev_value.sival_ptr = &timer_id;
 	
 	//Get Correct Thread ID
 	sev._sigev_un._tid = syscall(SYS_gettid);	//Gets thread ID of POSIX Thread
 	
 	//Create Timer for DOS Attacks
-	if(timer_create(CLOCKID, &sev, &timerid) == -1){
+	if(timer_create(CLOCK_REALTIME, &sev, &timer_id) == -1){
 		fputs("Error Creating Timer\n", stderr);
 		return EXIT_FAILURE;
 	}
 	
 	//Set Up Timer Length
-	time_specs->it_value.tv_sec = MAX_TIME_IMPL;
-	time_specs->it_value.tv_nsec = 0;
+	time_specs.it_value.tv_sec = MAX_TIME_IMPL;
+	time_specs.it_value.tv_nsec = 0;
 	
 	//Set Timer Length
-	if(timer_settime(timer_id, 0 &time_specs, NULL) == -1){
+	if(timer_settime(timer_id, 0, &time_specs, NULL) == -1){
 		fputs("Error Setting the Time for the POSIX Timer\n", stderr);
 		return EXIT_FAILURE;
 	}
