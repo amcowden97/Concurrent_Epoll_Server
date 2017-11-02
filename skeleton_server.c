@@ -1,3 +1,14 @@
+/***********************************************
+Creator: Andrew Michael Cowden
+	Email: am.cowden.97@gmail.com
+	Github Username: amcowden97
+Date Created: October 15, 2017
+Project Name: Epoll Concurrent Linux Server
+Project Description:
+	
+	
+************************************************/
+
 #define _XOPEN_SOURCE 600
 #define _GNU_SOURCE
 
@@ -69,15 +80,9 @@ int main(){
 	}
 			
 	//Make Epoll Unit to Transfer client socket to PTY Master
-	if ((epoll_fd = epoll_create(1)) == -1) {
+	if ((epoll_fd = epoll_create1(EPOLL_CLOEXEC)) == -1) {
 		fputs("Error Creating Epoll Unit\n", stderr);
 		exit(EXIT_FAILURE); 
-	}
-	
-	//Set Up Close on Exec for Epoll Unit File Descriptor
-	if(fcntl(epoll_fd, F_SETFD, FD_CLOEXEC) == -1){
-		fputs("Error Setting Up Close on Exec for Epoll File Descriptor\n", stderr);
-		exit(EXIT_FAILURE);
 	}
 	
 	//Create Thread to Handle File Descriptor Selection and Read/Write
@@ -91,15 +96,8 @@ int main(){
         
 		//Accept Client
         client_len = sizeof(client_address);
-        if((client_sockfd = accept(server_sockfd, (struct sockaddr *) &client_address, &client_len)) == -1){
+        if((client_sockfd = accept4(server_sockfd, (struct sockaddr *) &client_address, &client_len, SOCK_CLOEXEC)) == -1){
 			fputs("Unable to Accept Client Socket\n", stderr);
-			close(client_sockfd);
-			continue;
-		}
-		
-		//Set Up Close on Exec for Client File Descriptor
-		if(fcntl(client_sockfd, F_SETFD, FD_CLOEXEC) == -1){
-			fputs("Error Setting Up Close on Exec for Client FD\n", stderr);
 			close(client_sockfd);
 			continue;
 		}
@@ -134,17 +132,11 @@ int create_socket(int *p_server_sockfd){
     server_address.sin_port = htons(PORT);
    
 	//Socket Initialization
-    if((*p_server_sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1){
+    if((*p_server_sockfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) == -1){
 		fputs("Error Creating Socket\n", stderr);
 		return -1;
 	}
-	
-	//Set Up Close on Exec for Server Socket File Descriptor
-	if(fcntl(*p_server_sockfd, F_SETFD, FD_CLOEXEC) == -1){
-		fputs("Error Setting Up Close on Exec for Server Socket File Descriptor\n", stderr);
-		return -1;
-	}
-	
+		
 	//Bind Address with Socket
     if(bind(*p_server_sockfd, (struct sockaddr *) &server_address, sizeof(server_address)) == -1){
 		fputs("Unable to Bind Address to Socket\n", stderr);
@@ -328,16 +320,9 @@ void handle_bash(char *slave_name){
 	}
 
 	//Open PTY Slave
-	int slave_fd = open(slave_name, O_RDWR);
+	int slave_fd = open(slave_name, O_RDWR | O_CLOEXEC);
 	if(slave_fd == -1){
 		fputs("Error Opening Slave File Descriptor\n", stderr);
-		exit(EXIT_FAILURE);
-	}
-
-	//Set Up Close on Exec for Slave File Descriptor
-	if(fcntl(slave_fd, F_SETFD, FD_CLOEXEC) == -1){
-		fputs("Error Setting Up Close on Exec for Slave\n", stderr);
-		close(slave_fd);
 		exit(EXIT_FAILURE);
 	}
 
@@ -411,16 +396,16 @@ void *epoll_select(){
 
 	//Loop and Find FD that are ready for IO
 	while ((ready = epoll_wait(epoll_fd, evlist, MAX_CLIENTS * 2, -1)) > 0) {
-		for (int index = 0; index < ready; index++) {
+		for (int i = 0; i < ready; i++) {
 	
 			//Check if Epoll was Invalid
-			if (evlist[index].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-				close(evlist[index].data.fd);
-				close(fd_pairs[evlist[index].data.fd]);
+			if (evlist[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+				close(evlist[i].data.fd);
+				close(fd_pairs[evlist[i].data.fd]);
 				
-			}else if (evlist[index].events & EPOLLIN) {
+			}else if (evlist[i].events & EPOLLIN) {
 				//Data is ready to read so transfer:
-				sourcefd = evlist[index].data.fd;
+				sourcefd = evlist[i].data.fd;
 				if(transfer_data(sourcefd, fd_pairs[sourcefd]) == -1){
 					fputs("Error Transfer Data between client and server fd\n", stderr);
 				}
