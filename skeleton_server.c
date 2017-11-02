@@ -9,18 +9,18 @@
 #include <string.h>
 #include <fcntl.h>
 #include <termios.h>
+#include <pthread.h>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <sys/epoll.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <pthread.h>
-#include <time.h>
 #include "readline.c"
 
 #define MAX_BUFF 4024
-#define MAX_TIME_IMPL 2
+#define MAX_TIMER_AMOUNT 2
 #define MAX_CLIENTS 100000
 #define PORT 4070
 #define SECRET "cs407rembash"
@@ -34,64 +34,40 @@ int bash_pid;
 
 //Function Prototypes
 void *handle_client(void *arg); 
-void *epoll_select();
-int verify_rembash(int connect_fd);
 void handle_bash(char *slave_name);
-int open_pty_master(char *slave_name);
-int transfer_data(int read_fd, int write_fd);
+
+void *epoll_select();
 void timer_sig_handler(int sig);
+int verify_protocol(int connect_fd);
+int transfer_data(int read_fd, int write_fd);
+
+int create_pty_master(char *slave_name);
+int create_socket(int *p_server_sockfd);
+int create_timer(timer_t *p_timer_id);
 
 
 int main(){
 		
-	//Variable Declarations for Server Socket
+	//Variable Declarations for Socket Ends (Client and Server)
+	struct sockaddr_in client_address;
     int server_sockfd, client_sockfd;
     socklen_t client_len;
-    struct sockaddr_in server_address;
-    struct sockaddr_in client_address;
 	
 	//Variable Declarations for Threads
 	pthread_t rw_thread, rembash_thread;
 	
-	//Socket Initialization
-    if((server_sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1){
-		fputs("Error Creating Socket\n", stderr);
-		exit(EXIT_FAILURE);
-	}
-	
-	//Set Up Close on Exec for Server Socket File Descriptor
-	if(fcntl(server_sockfd, F_SETFD, FD_CLOEXEC) == -1){
-		fputs("Error Setting Up Close on Exec for Server Socket File Descriptor\n", stderr);
-		exit(EXIT_FAILURE);
-	}
-
-	//Address Initialization
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_address.sin_port = htons(PORT);
-	
-	//Bind Address with Socket
-    if(bind(server_sockfd, (struct sockaddr *) &server_address, sizeof(server_address)) == -1){
-		fputs("Unable to Bind Address to Socket\n", stderr);
-		exit(EXIT_FAILURE);
-	}
-	
-	//Listen for Connections on Socket
-    if(listen(server_sockfd, 5) == -1){
-		fputs("Unable to Mark the Socket as Listening\n", stderr);
-		exit(EXIT_FAILURE);
-	}
-	
-	//Set Port Reuse in Abnormal Termination
-	int i=1;
-	setsockopt(server_sockfd, SOL_SOCKET, SO_REUSEADDR, &i, sizeof(i));
-   
 	//Eliminate Need for Child Proccess Collection
 	if(signal(SIGCHLD, SIG_IGN) == SIG_ERR){
 		fputs("Unable to Set Up Signal\n", stderr);
 		exit(EXIT_FAILURE);
 	}
-		
+	
+	//Create Socket and Bind it with Corresponding Address
+	if(create_socket(&server_sockfd) == -1){
+		fputs("Failed to Create Socket\n", stderr);
+		exit(EXIT_FAILURE);
+	}
+			
 	//Make Epoll Unit to Transfer client socket to PTY Master
 	if ((epoll_fd = epoll_create(1)) == -1) {
 		fputs("Error Creating Epoll Unit\n", stderr);
@@ -149,6 +125,86 @@ int main(){
 }
 
 
+int create_socket(int *p_server_sockfd){
+	
+	//Address Initialization
+	struct sockaddr_in server_address;
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_address.sin_port = htons(PORT);
+   
+	//Socket Initialization
+    if((*p_server_sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1){
+		fputs("Error Creating Socket\n", stderr);
+		return -1;
+	}
+	
+	//Set Up Close on Exec for Server Socket File Descriptor
+	if(fcntl(*p_server_sockfd, F_SETFD, FD_CLOEXEC) == -1){
+		fputs("Error Setting Up Close on Exec for Server Socket File Descriptor\n", stderr);
+		return -1;
+	}
+	
+	//Bind Address with Socket
+    if(bind(*p_server_sockfd, (struct sockaddr *) &server_address, sizeof(server_address)) == -1){
+		fputs("Unable to Bind Address to Socket\n", stderr);
+		return -1;
+	}
+	
+	//Listen for Connections on Socket
+    if(listen(*p_server_sockfd, 5) == -1){
+		fputs("Unable to Mark the Socket as Listening\n", stderr);
+		return -1;
+	}
+	
+	//Set Port Reuse in Abnormal Termination
+	int i=1;
+	setsockopt(*p_server_sockfd, SOL_SOCKET, SO_REUSEADDR, &i, sizeof(i));
+	
+	return 0;
+}
+
+
+int create_timer(timer_t *p_timer_id){
+	
+	//Structs for Timer Siginal Behavior and Timer Length
+	struct sigevent sev;
+	struct itimerspec time_specs;
+	struct sigaction handler_sigaction;
+	
+	//Set Up Timer Signal Handler
+	memset(&handler_sigaction, 0, sizeof(handler_sigaction));
+	handler_sigaction.sa_handler = timer_sig_handler;
+	sigemptyset(&handler_sigaction.sa_mask);
+	sigaction(SIGALRM, &handler_sigaction, NULL);
+
+	//Create POSIX Timer
+	sev.sigev_notify = SIGEV_THREAD_ID;
+	sev.sigev_signo = SIGALRM;
+	sev.sigev_value.sival_ptr = p_timer_id;
+	
+	//Get Correct Thread ID
+	sev._sigev_un._tid = syscall(SYS_gettid);	//Gets thread ID of POSIX Thread
+	
+	//Create Timer for DOS Attacks
+	if(timer_create(CLOCK_REALTIME, &sev, p_timer_id) == -1){
+		fputs("Error Creating Timer\n", stderr);
+		return -1;
+	}
+	
+	//Set Up Timer Length
+	time_specs.it_value.tv_sec = MAX_TIMER_AMOUNT;
+	time_specs.it_value.tv_nsec = 0;
+	
+	//Set Timer Length
+	if(timer_settime(*p_timer_id, 0, &time_specs, NULL) == -1){
+		fputs("Error Setting the Time for the POSIX Timer\n", stderr);
+		return -1;
+	}
+	return 0;
+}
+
+
 void *handle_client(void *arg){
 	
 	int master_fd, connect_fd;
@@ -159,7 +215,7 @@ void *handle_client(void *arg){
 	free(arg);
 	
 	//Verify Valid Client
-	if(verify_rembash(connect_fd) == EXIT_FAILURE){
+	if(verify_protocol(connect_fd) == -1){
 		fputs("Unable to Connect Client\n", stderr);
 		close(connect_fd);
 		pthread_exit(NULL);
@@ -173,7 +229,7 @@ void *handle_client(void *arg){
 	}
 
 	//Open PTY and get Master and Slaves
-	if((master_fd = open_pty_master(slave_name)) == -1){
+	if((master_fd = create_pty_master(slave_name)) == -1){
 		fputs("Error Opening Master File Descriptor\n", stderr);
 		close(connect_fd);
 		pthread_exit(NULL);
@@ -217,7 +273,7 @@ void *handle_client(void *arg){
 }
 
 
-int verify_rembash(int connect_fd){
+int verify_protocol(int connect_fd){
 	
 	//Variables for Reading and Writing
 	char *message_buffer;
@@ -225,47 +281,19 @@ int verify_rembash(int connect_fd){
 	const char * const error_message = "<error>\n";
 	const char * const ok_message = "<ok>\n";
 	
-	//Timer Variables
-	timer_t timer_id;
-	struct sigevent sev;
-	struct itimerspec time_specs;
-
 	//Rembash Send
 	if(write(connect_fd, rembash_message, strlen(rembash_message)) < strlen(rembash_message)){
 		fputs("Imcomplete Write: Missing Data\n", stderr);
 		close(connect_fd);
-        return EXIT_FAILURE;
-	}
-
-	//Set Up Timer Signal Handler
-	struct sigaction response;
-	memset(&response, 0, sizeof(response));
-	response.sa_handler = timer_sig_handler;
-	sigemptyset(&response.sa_mask);
-	sigaction(SIGALRM, &response, NULL);
-
-	//Create POSIX Timer
-	sev.sigev_notify = SIGEV_THREAD_ID;
-	sev.sigev_signo = SIGALRM;
-	sev.sigev_value.sival_ptr = &timer_id;
-	
-	//Get Correct Thread ID
-	sev._sigev_un._tid = syscall(SYS_gettid);	//Gets thread ID of POSIX Thread
-	
-	//Create Timer for DOS Attacks
-	if(timer_create(CLOCK_REALTIME, &sev, &timer_id) == -1){
-		fputs("Error Creating Timer\n", stderr);
-		return EXIT_FAILURE;
+        return -1;
 	}
 	
-	//Set Up Timer Length
-	time_specs.it_value.tv_sec = MAX_TIME_IMPL;
-	time_specs.it_value.tv_nsec = 0;
-	
-	//Set Timer Length
-	if(timer_settime(timer_id, 0, &time_specs, NULL) == -1){
-		fputs("Error Setting the Time for the POSIX Timer\n", stderr);
-		return EXIT_FAILURE;
+	//Create Timer to Prevent DOS Attacks
+	timer_t timer_id;
+	if(create_timer(&timer_id) == -1){
+		fputs("Timer Timed Out...\n", stderr);
+		close(connect_fd);
+        return -1;
 	}
 	
 	//Secret Message Recieving 
@@ -278,16 +306,16 @@ int verify_rembash(int connect_fd){
 	if(strcmp("<" SECRET ">\n", message_buffer) != 0){
 		write(connect_fd, error_message, strlen(error_message));
 		close(connect_fd);
-		return EXIT_FAILURE;
+		return -1;
 	}
 
 	//Final OK Message
 	if(write(connect_fd, ok_message, strlen(ok_message)) < strlen(ok_message)){
 		fputs("Imcomplete Write: Missing Data\n", stderr);
 		close(connect_fd);
-        return EXIT_FAILURE;
+        return -1;
 	}
-	return EXIT_SUCCESS;
+	return 0;
 }
 
 
@@ -329,7 +357,7 @@ void handle_bash(char *slave_name){
 }
 
 
-int open_pty_master(char *slave_name){
+int create_pty_master(char *slave_name){
 	
 	//Variable to Hold Slave and Master fd and name
 	char *slave_temp;
