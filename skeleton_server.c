@@ -1,13 +1,19 @@
-/***********************************************
+/***********************************************************************************************
 Creator: Andrew Michael Cowden
 	Email: am.cowden.97@gmail.com
 	Github Username: amcowden97
 Date Created: October 15, 2017
+
 Project Name: Epoll Concurrent Linux Server
 Project Description:
-	
-	
-************************************************/
+	The functionality of this project allows for a number of remote clients to access
+	the files found on the server machine. It is quite similar to a Telnet implementation
+	as it does not use encryption techniques. This project uses a multithreaded approach with 
+	Linux's Epoll in order to handle clients efficiently and in a greater number than the 
+	traditional multiprocess approach. In order to increase the response time and to avoid 
+	client blocking, a thread pool is used to handle the client threads as well as the inital 
+	verification process for clients. 
+************************************************************************************************/
 
 #define _XOPEN_SOURCE 600
 #define _GNU_SOURCE
@@ -46,12 +52,10 @@ int bash_pid;
 //Function Prototypes
 void *handle_client(void *arg); 
 void handle_bash(char *slave_name);
-
 void *epoll_select();
 void timer_sig_handler(int sig);
 int verify_protocol(int connect_fd);
 int transfer_data(int read_fd, int write_fd);
-
 int create_pty_master(char *slave_name);
 int create_socket(int *p_server_sockfd);
 int create_timer(timer_t *p_timer_id);
