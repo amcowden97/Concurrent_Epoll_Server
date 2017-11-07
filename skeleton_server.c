@@ -4,7 +4,7 @@ Creator: Andrew Michael Cowden
 	Github Username: amcowden97
 Date Created: October 15, 2017
 
-Project Name: Epoll Concurrent Linux Server
+Project Name: Concurrent Epoll Linux Server
 Project Description:
 	The functionality of this project allows for a number of remote clients to access
 	the files found on the server machine. It is quite similar to a Telnet implementation
@@ -13,6 +13,16 @@ Project Description:
 	traditional multiprocess approach. In order to increase the response time and to avoid 
 	client blocking, a thread pool is used to handle the client threads as well as the inital 
 	verification process for clients. 
+	
+Use and Development Notes:
+	The client and server programs developed on for use on Linux Systems only due to Linux
+	specific structures. These programs have been tested on Elementary OS 0.4.1 "Loki" with
+	the corresponding Pantheon PseudoTerminal.
+	
+A Note About Dyanmic Memory Allocation:
+	Within this program, several instances of dynamic memory allocation are used to thread data
+	or client objects. This current version does not free this allocated memory but rather uses
+	its own memory handling through a preallocated list of memory.
 ************************************************************************************************/
 
 #define _XOPEN_SOURCE 600
@@ -73,25 +83,35 @@ int main(){
 	
 	//Eliminate Need for Child Proccess Collection
 	if(signal(SIGCHLD, SIG_IGN) == SIG_ERR){
-		fputs("Unable to Set Up Signal\n", stderr);
+		perror("In Function (Main), Failed To Set Up SIGCHLD Signal To Be Ignored In" 
+			   " Order To Disregaurd Collecting Terminated Process Childern. This Call" 
+			   " Is Used To Collect the Terminated Bash Subprocess. \n\tNOTE This" 
+			   " Error Terminates The Server Program.\n");
 		exit(EXIT_FAILURE);
 	}
 	
 	//Create Socket and Bind it with Corresponding Address
 	if(create_socket(&server_sockfd) == -1){
-		fputs("Failed to Create Socket\n", stderr);
+		perror("In Function (Main), Failed To Create Socket And Initialize Socket By"
+			   " Calling The Function (create_socket). \n\tNOTE This Error Terminates"
+			   " The Server Program.\n");
 		exit(EXIT_FAILURE);
 	}
 			
 	//Make Epoll Unit to Transfer client socket to PTY Master
 	if ((epoll_fd = epoll_create1(EPOLL_CLOEXEC)) == -1) {
-		fputs("Error Creating Epoll Unit\n", stderr);
+		perror("In Function (Main), Failed To Create An Epoll Unit. This Epoll Thread"
+			   " Is The Only Primary Thread In This Program That Does Not Run"
+			   " From The Thread Pool \n\tNOTE This Error Terminates The Server"
+			   " Program.\n");
 		exit(EXIT_FAILURE); 
 	}
 	
 	//Create Thread to Handle File Descriptor Selection and Read/Write
 	if(pthread_create(&rw_thread, NULL, epoll_select, NULL) == -1){
-		fputs("Error Creating Thread for Epoll IO", stderr);
+		perror("In Function (Main), Failed To Create POSIX Thread To Handle Epoll"
+			   " Unit For File Descriptor Read And Write. \n\tNOTE This Error" 
+			   " Terminates The Server Program.\n");
 		exit(EXIT_FAILURE); 
 	}
 
@@ -101,15 +121,21 @@ int main(){
 		//Accept Client
         client_len = sizeof(client_address);
         if((client_sockfd = accept4(server_sockfd, (struct sockaddr *) &client_address, &client_len, SOCK_CLOEXEC)) == -1){
-			fputs("Unable to Accept Client Socket\n", stderr);
-			close(client_sockfd);
+			perror("In Function (Main - Server Loop), Failed To Accept Client Socket"
+				   " Address Connection. \n\tNOTE This Error Causes The Server"
+				   " Loop To Start At the Beginnnig Of Its Execution To Accept"
+				   " More Clients.\n");
 			continue;
 		}
 		
 		//Save Client File Descriptor for Thread Process
 		int *fdptr;
 		if((fdptr = malloc(sizeof(int))) == NULL){
-			fputs("Error Allocating Memory for Storing Client FD\n", stderr);
+			perror("In Function (Main - Server Loop), Failed To Allocate Memory To"
+				   " Send Client File Descriptor To Rembash Validation. \n\tNOTE"
+				   " This Error Closes The Corresponding Client File Descriptor and"
+				   " Causes The Server Loop To Start At the Beginnnig Of Its Execution"
+				   " To Accept More Clients.\n");
 			close(client_sockfd);
 			continue;
 		}
@@ -118,7 +144,11 @@ int main(){
 		
 		//Create Thread for Verifying Rembash Protocol
 		if(pthread_create(&rembash_thread, NULL, handle_client, fdptr) == -1){
-        	fputs("Error Creating Thread for Verifying Rembash Protocol", stderr);
+        		perror("In Function (Main - Server Loop), Failed To Create POSIX"
+					   " Thread To Verify Client.\n\tNOTE This Error Closes The"
+					   " Corresponding Client File Descriptor and Causes The Server"
+					   " Loop To Start At the Beginnnig Of Its Execution To Accept"
+					   " More Clients.\n");
 			close(client_sockfd);
 			continue;
 		}
@@ -129,6 +159,9 @@ int main(){
 
 int create_socket(int *p_server_sockfd){
 	
+	//Listening Socket Constant
+	const int MAX_BACKLOG = 5;
+	
 	//Address Initialization
 	struct sockaddr_in server_address;
     server_address.sin_family = AF_INET;
@@ -137,25 +170,36 @@ int create_socket(int *p_server_sockfd){
    
 	//Socket Initialization
     if((*p_server_sockfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) == -1){
-		fputs("Error Creating Socket\n", stderr);
+			perror("In Function (create_socket), Failed To Create Server Side"
+				  " Of The Connection Socket. \n\tNOTE: This Error Exits The"
+				  " Corresponding Function.");
 		return -1;
 	}
 		
 	//Bind Address with Socket
     if(bind(*p_server_sockfd, (struct sockaddr *) &server_address, sizeof(server_address)) == -1){
-		fputs("Unable to Bind Address to Socket\n", stderr);
+		perror("In Function (create_socket), Failed To Bind The Server Socket File"
+			   " Descriptor And The Wanted IP Address and Port Number. \n\tNOTE: This"
+			   " Error Exits The Corresponding Function.");
 		return -1;
 	}
 	
 	//Listen for Connections on Socket
-    if(listen(*p_server_sockfd, 5) == -1){
-		fputs("Unable to Mark the Socket as Listening\n", stderr);
+    if(listen(*p_server_sockfd, MAX_BACKLOG) == -1){
+		perror("In Function (create_socket), Failed To Set The Listening Socket As A"
+			   " Passive Socket To Accept Incoming Client Connections. \n\tNOTE: This"
+			   " Error Exits The Corresponding Function.");
 		return -1;
 	}
 	
-	//Set Port Reuse in Abnormal Termination
+	//Set Addresss Reuse in Termination
 	int i=1;
-	setsockopt(*p_server_sockfd, SOL_SOCKET, SO_REUSEADDR, &i, sizeof(i));
+	if(setsockopt(*p_server_sockfd, SOL_SOCKET, SO_REUSEADDR, &i, sizeof(i)) == -1){
+		perror("In Function (create_socket), Failed To Set The Address Of The"
+			   " Socket To Be Reused In The Event Of Termination To Enhance Testing."
+			   " \n\tNOTE: This Error Exits The Corresponding Function.");
+		return -1;
+	}
 	
 	return 0;
 }
@@ -355,21 +399,21 @@ int create_pty_master(char *slave_name){
 	//Opent PTY Master File Descriptor
 	if((master_fd = posix_openpt(O_RDWR | O_NOCTTY)) == -1){
 		fputs("Error Opening PTY\n", stderr);
-		return EXIT_FAILURE;
+		return -1;
 	}
 	
 	//Set Up Close on Exec for Master File Descriptor
 	if(fcntl(master_fd, F_SETFD, FD_CLOEXEC) == -1){
 		fputs("Error Setting Up Close on Exec for Master\n", stderr);
 		close(master_fd);
-		return EXIT_FAILURE;
+		return -1;
 	}
 	
 	//Unlock Slave PTY File Descriptor
 	if(unlockpt(master_fd) == -1){
 		fputs("Error Unlocking PTY\n", stderr);
 		close(master_fd);
-		return EXIT_FAILURE;
+		return -1;
 	}
 	
 	//Get Slave Name 
@@ -377,14 +421,14 @@ int create_pty_master(char *slave_name){
 	if(slave_temp == NULL){
 		fputs("Error Getting Slave Name\n", stderr);
 		close(master_fd);
-		return EXIT_FAILURE;
+		return -1;
 	}
 	
 	//See if String is Able to Be Copied
 	if(strlen(slave_temp) >= MAX_BUFF){
 		fputs("Insufficient Storage for Slave Name\n", stderr);
 		close(master_fd);
-		return EXIT_FAILURE;
+		return -1;
 	}
 	
 	//Copy String to New Location
@@ -421,15 +465,15 @@ void *epoll_select(){
 
 int transfer_data(int read_fd, int write_fd){
 	
+	static char *read_buffer; 
 	int chars_read = 0;
-	char *read_buffer; 
 	
 	//Memory Allocation Error Checking
 	if((read_buffer = malloc(sizeof(char) * MAX_BUFF)) == NULL){
 		fputs("Error Allocating Memory\n", stderr);
 		close(read_fd);
 		close(write_fd);
-		return EXIT_FAILURE;
+		return -1;
 	}
 	
 	//Read from File Descriptor
@@ -437,7 +481,7 @@ int transfer_data(int read_fd, int write_fd){
 		fputs("Error reading from File Descriptor\n", stderr);
 		close(read_fd);
 		close(write_fd);
-		return EXIT_FAILURE;
+		return -1;
 	}
 	
 	//Write to File Descriptor
@@ -445,9 +489,9 @@ int transfer_data(int read_fd, int write_fd){
 		fputs("Did not complete Write System call\n", stderr);
 		close(read_fd);
 		close(write_fd);
-		return EXIT_FAILURE;
+		return -1;
 	}
-	return EXIT_SUCCESS;
+	return 0;
 }
 
 
