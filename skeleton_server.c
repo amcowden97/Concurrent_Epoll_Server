@@ -1,4 +1,4 @@
-/***********************************************************************************************
+/**************************************************************************************
 Creator: Andrew Michael Cowden
 	Email: am.cowden.97@gmail.com
 	Github Username: amcowden97
@@ -7,23 +7,24 @@ Date Created: October 15, 2017
 Project Name: Concurrent Epoll Linux Server
 Project Description:
 	The functionality of this project allows for a number of remote clients to access
-	the files found on the server machine. It is quite similar to a Telnet implementation
-	as it does not use encryption techniques. This project uses a multithreaded approach with 
-	Linux's Epoll in order to handle clients efficiently and in a greater number than the 
-	traditional multiprocess approach. In order to increase the response time and to avoid 
-	client blocking, a thread pool is used to handle the client threads as well as the inital 
-	verification process for clients. 
+	the files found on the server machine. It is quite similar to a Telnet
+	implementation as it does not use encryption techniques. This project uses a
+	multithreaded approach with Linux's Epoll in order to handle clients efficiently
+	and in a greater number than the traditional multiprocess approach. In order to
+	increase the response time and to avoid client blocking, a thread pool is used to
+	handle the client threads as well as the inital verification process for clients.
 	
 Use and Development Notes:
-	The client and server programs developed on for use on Linux Systems only due to Linux
-	specific structures. These programs have been tested on Elementary OS 0.4.1 "Loki" with
-	the corresponding Pantheon PseudoTerminal.
+	The client and server programs developed on for use on Linux Systems only due to
+	Linux specific structures. These programs have been tested on Elementary OS 0.4.1
+	"Loki" with the corresponding Pantheon PseudoTerminal.
 	
 A Note About Dyanmic Memory Allocation:
-	Within this program, several instances of dynamic memory allocation are used to thread data
-	or client objects. This current version does not free this allocated memory but rather uses
-	its own memory handling through a preallocated list of memory.
-************************************************************************************************/
+	Within this program, several instances of dynamic memory allocation are used to
+	transfer data or client objects. This current version does not free this allocated
+	memory but rather uses its own memory handling through a preallocated list of
+	memory.
+**************************************************************************************/
 
 #define _XOPEN_SOURCE 600
 #define _GNU_SOURCE
@@ -60,15 +61,17 @@ int fd_pairs[MAX_CLIENTS * 2 + 5];
 int bash_pid;
 
 //Function Prototypes
+void timer_sig_handler(int sig);
 void *handle_client(void *arg); 
 void handle_bash(char *slave_name);
-void *epoll_select();
-void timer_sig_handler(int sig);
-int verify_protocol(int connect_fd);
-int transfer_data(int read_fd, int write_fd);
+void *handle_epoll();
 int create_pty_master(char *slave_name);
 int create_socket(int *p_server_sockfd);
 int create_timer(timer_t *p_timer_id);
+int verify_protocol(int connect_fd);
+int transfer_data(int read_fd, int write_fd);
+int add_to_epoll(int client_fd, int master_fd);
+
 
 
 int main(){
@@ -108,7 +111,7 @@ int main(){
 	}
 	
 	//Create Thread to Handle File Descriptor Selection and Read/Write
-	if(pthread_create(&rw_thread, NULL, epoll_select, NULL) == -1){
+	if(pthread_create(&rw_thread, NULL, handle_epoll, NULL) == -1){
 		perror("In Function (Main), Failed To Create POSIX Thread To Handle Epoll"
 			   " Unit For File Descriptor Read And Write. \n\tNOTE This Error" 
 			   " Terminates The Server Program.\n");
@@ -153,7 +156,215 @@ int main(){
 			continue;
 		}
 	}
-	exit(EXIT_SUCCESS);
+	
+	perror("In Function (Main - Server Loop), \n\tNOTE An Error Occurred Causing The"
+		   " Infinite Server Loop To Terminate Causing The Server To Crash.\n");
+	exit(EXIT_FAILURE);
+}
+
+
+void timer_sig_handler(int sig){
+	/*Once a timer is set off, it interrupts a blocking read call
+	in the thread that called it*/
+}
+
+
+void *handle_client(void *arg){
+	
+	int master_fd, connect_fd;
+	char *slave_name;
+	
+	//Get Client File Descriptor
+	connect_fd = *(int*)arg;
+	free(arg);
+	
+	//Verify Valid Client
+	if(verify_protocol(connect_fd) == -1){
+		perror("In Function (handle_client), The Corresponding Client Timed Out Due To"
+			   " Incorrect Passphrase.\n\tNOTE: This Error Exits The Corresponding"
+			   " Thread Resulting In The Client Terminating.");
+		close(connect_fd);
+		pthread_exit(NULL);
+	}
+
+	//Dynamic Memory to Store Slave Name 
+	if((slave_name = malloc(MAX_BUFF * sizeof(char))) == NULL){
+			perror("In Function (handle_client), Error Allocating Memory To Store The"
+				   " PTY Slave Name To Pass To The Bash Process. \n\tNOTE: This Error"
+				   " Exits The Corresponding Thread Resulting In The Client"
+				   " Terminating.");
+		close(connect_fd);
+		pthread_exit(NULL);
+	}
+
+	//Open PTY and get Master and Slaves
+	if((master_fd = create_pty_master(slave_name)) == -1){
+			perror("In Function (handle_client), Failure To Create The PTY Master And"
+				   " Slave Pairs.\n\tNOTE: This Error Exits The Corresponding Thread"
+				   " Resulting In The Client Terminating.");
+		close(connect_fd);
+		pthread_exit(NULL);
+
+	}
+	
+	//Add File Descriptors to Epoll Unit
+	if(add_to_epoll(connect_fd, master_fd) == -1){
+		perror("In Function (handle_client), Failed To Add Client File Descriptor And"
+			   " Corresponding PTY Master File Descriptor To Epoll Unit. \n\tNOTE:"
+			   " This Error Exits The Corresponding Thread Resulting In The Client"
+			   " Terminating.");
+		close(connect_fd);
+		close(master_fd);
+		pthread_exit(NULL);
+	}
+	
+	//Handle Bash in Subprocess
+	switch((bash_pid = fork())){
+		case 0:
+			handle_bash(slave_name);
+		break;
+		case -1:
+			perror("In Function (handle_client), This Error Results From The Failure"
+				   " Of The Fork Call Making A New Process To Run The Client's Bash"
+				   " Session. \n\tNOTE: This Error Exits The Corresponding Thread"
+				   " Resulting In The Client Terminating.");
+			close(connect_fd);
+			close(master_fd);
+	}
+	pthread_exit(NULL);
+}
+
+
+void handle_bash(char *slave_name){
+
+	//Create New Session ID
+	if(setsid() == -1){
+		perror("In Function (handle_bash), Error Setting Session ID In Order To"
+			   " Prevent Bash's Need For Seperate Session IDs For Each Process."
+			   " \n\tNOTE: This Error Exits The Corresponding Bash Process Resulting"
+			   " In The Client Terminating.");
+		exit(EXIT_FAILURE);
+	}
+
+	//Open PTY Slave
+	int slave_fd = open(slave_name, O_RDWR | O_CLOEXEC);
+	if(slave_fd == -1){
+			perror("In Function (handle_bash), Error Opening Slave File Descriptor For"
+				   " PTY. \n\tNOTE: This Error Exits The Corresponding Bash Process"
+				   " Resulting In The Client Terminating.");
+		exit(EXIT_FAILURE);
+	}
+	
+	free(slave_name);
+
+	//Dup Redirection
+	if(dup2(slave_fd, STDOUT_FILENO) == -1 || dup2(slave_fd, STDERR_FILENO) == -1 || dup2(slave_fd, STDIN_FILENO) == -1){	
+			perror("In Function (handle_bash), Error Redirecting PTY Slave File"
+				   " Descriptor To STDIN STDOUT And STDERR For User. \n\tNOTE: This"
+				   " Error Exits The Corresponding Bash Process Resulting In The"
+				   " Client Terminating.");
+		close(slave_fd);
+		exit(EXIT_FAILURE);
+	}
+
+	//Spawn Bash
+	if(execlp("bash", "bash", NULL) == -1){ 
+			perror("In Function (handle_bash), Error Execing Bash Process For Client"
+				   " Interaction. \n\tNOTE: This Error Exits The Corresponding Bash"
+				   " Process Resulting In The Client Terminating.");
+		close(slave_fd);
+		exit(EXIT_FAILURE);
+	}
+}
+
+
+void *handle_epoll(){
+	
+	int ready, sourcefd;
+	struct epoll_event evlist[20];
+
+	//Loop and Find FD that are ready for IO
+	while ((ready = epoll_wait(epoll_fd, evlist, MAX_CLIENTS * 2, -1)) > 0) {
+		for (int i = 0; i < ready; i++) {
+	
+			//Check if Epoll was Invalid
+			if (evlist[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+				close(evlist[i].data.fd);
+				close(fd_pairs[evlist[i].data.fd]);
+				
+			}else if (evlist[i].events & EPOLLIN) {
+				//Data is ready to read so transfer:
+				sourcefd = evlist[i].data.fd;
+				if(transfer_data(sourcefd, fd_pairs[sourcefd]) == -1){
+					perror("In Function (handle_epoll), Error Transfering Data Between"
+						   " Client And PTY Master File Descriptors. \n\tNOTE: This"
+						   " Error Results In The Client Terminating.");
+					close(sourcefd);
+					close(fd_pairs[sourcefd]);
+				}
+			}
+		}
+	}
+	perror("In Function (handle_epoll - Epoll Loop), \n\tNOTE An Error Occurred"
+		   " Causing The Infinite Epoll Loop To Terminate Causing The Server To"
+		   " Crash.\n");
+	pthread_exit(NULL);
+}
+
+
+int create_pty_master(char *slave_name){
+	
+	//Variable to Hold Slave and Master fd and name
+	char *slave_temp;
+	int master_fd;
+	
+	//Opent PTY Master File Descriptor
+	if((master_fd = posix_openpt(O_RDWR | O_NOCTTY)) == -1){
+		perror("In Function (create_pty_master), Error Opening Master File Descriptor"
+			   " For The PTY. \n\tNOTE: This Error Exits The Corresponding Function.");
+		return -1;
+	}
+	
+	//Set Up Close on Exec for Master File Descriptor
+	if(fcntl(master_fd, F_SETFD, FD_CLOEXEC) == -1){
+		perror("In Function (create_pty_master), Error Setting Up Close On Exec For"
+			   " The PTY Master File Descriptor. \n\tNOTE: This Error Exits The"
+			   " Corresponding Function.");
+		close(master_fd);
+		return -1;
+	}
+	
+	//Unlock Slave PTY File Descriptor
+	if(unlockpt(master_fd) == -1){
+		perror("In Function (create_pty_master), Error Unlocking The PTY Master File"
+			   " Descriptor In Order To Get The PTY Slave Pairing For The PTY."
+			   " \n\tNOTE: This Error Exits The Corresponding Function.");
+		close(master_fd);
+		return -1;
+	}
+	
+	//Get Slave Name 
+	slave_temp = ptsname(master_fd);
+	if(slave_temp == NULL){
+		perror("In Function (create_pty_master), Error Opening The PTY Slave Name And"
+			   " Storing.\n\tNOTE: This Error Exits The Corresponding Function.");
+		close(master_fd);
+		return -1;
+	}
+	
+	//See if String is Able to Be Copied
+	if(strlen(slave_temp) >= MAX_BUFF){
+		perror("In Function (create_pty_master), Error Storing The Slave Name In A"
+			   " Temporary Variable To Avoid Writting Over It With Another Function"
+			   " Call. \n\tNOTE: This Error Exits The Corresponding Function.");
+		close(master_fd);
+		return -1;
+	}
+	
+	//Copy String to New Location
+	strncpy(slave_name, slave_temp, MAX_BUFF);
+	
+	return master_fd;
 }
 
 
@@ -200,7 +411,6 @@ int create_socket(int *p_server_sockfd){
 			   " \n\tNOTE: This Error Exits The Corresponding Function.");
 		return -1;
 	}
-	
 	return 0;
 }
 
@@ -228,7 +438,10 @@ int create_timer(timer_t *p_timer_id){
 	
 	//Create Timer for DOS Attacks
 	if(timer_create(CLOCK_REALTIME, &sev, p_timer_id) == -1){
-		fputs("Error Creating Timer\n", stderr);
+		perror("In Function (create_timer), Failed To Create A POSIX Timer In Order To"
+			   " Prevent DOS Attacks. Expiration Of This Timer Results In The"
+			   " Disconnection Of The Corresponding Client. \n\tNOTE: This Error Exits"
+			   " The Corresponding Function.");
 		return -1;
 	}
 	
@@ -238,78 +451,13 @@ int create_timer(timer_t *p_timer_id){
 	
 	//Set Timer Length
 	if(timer_settime(*p_timer_id, 0, &time_specs, NULL) == -1){
-		fputs("Error Setting the Time for the POSIX Timer\n", stderr);
+		perror("In Function (create_timer), Failed To Set The Time Parameters For The"
+			   " POSIX Timer. Failure To Set The Timer Parameters Results In"
+			   " Disconnection Of The Client.\n\tNOTE: This Error Exits The"
+			   " Corresponding Function.");
 		return -1;
 	}
 	return 0;
-}
-
-
-void *handle_client(void *arg){
-	
-	int master_fd, connect_fd;
-	char *slave_name;
-	
-	//Get Client File Descriptor
-	connect_fd = *(int*)arg;
-	free(arg);
-	
-	//Verify Valid Client
-	if(verify_protocol(connect_fd) == -1){
-		fputs("Unable to Connect Client\n", stderr);
-		close(connect_fd);
-		pthread_exit(NULL);
-	}
-
-	//Dynamic Memory to Store Slave Name 
-	if((slave_name = malloc(MAX_BUFF * sizeof(char))) == NULL){
-		fputs("Error Allocating Memeory\n", stderr);
-		close(connect_fd);
-		pthread_exit(NULL);
-	}
-
-	//Open PTY and get Master and Slaves
-	if((master_fd = create_pty_master(slave_name)) == -1){
-		fputs("Error Opening Master File Descriptor\n", stderr);
-		close(connect_fd);
-		pthread_exit(NULL);
-
-	}
-	
-	//Add Client Socket and Master PTY File Descriptors to Epoll
-	struct epoll_event ev;
-	ev.events = EPOLLIN;
-	
-  	ev.data.fd = connect_fd;
-  	if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connect_fd, &ev) == -1){
-    	fputs("Error Adding Client Socket to Epoll Event Queue\n", stderr);
-		close(connect_fd);
-		close(master_fd);
-		pthread_exit(NULL);
-	}
-	
-	ev.data.fd = master_fd;
-    if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, master_fd, &ev) == -1){
-    	fputs("Error Adding Master File Descriptor to Epoll Event Queue", stderr);
-		close(connect_fd);
-		close(master_fd);
-		pthread_exit(NULL);
-	}
-
-	//Store Client File Descriptor and Master File Descriptor Pairs
-	fd_pairs[connect_fd] = master_fd;
-	fd_pairs[master_fd] = connect_fd;
-	
-	//Handle Bash in Subprocess
-	switch((bash_pid = fork())){
-		case 0:
-			handle_bash(slave_name);
-		break;
-		case -1:
-			fputs("Error Forking to Handle Bash Process\n", stderr);
-			close(connect_fd);
-	}
-	pthread_exit(NULL);
 }
 
 
@@ -324,15 +472,14 @@ int verify_protocol(int connect_fd){
 	//Rembash Send
 	if(write(connect_fd, rembash_message, strlen(rembash_message)) < strlen(rembash_message)){
 		fputs("Imcomplete Write: Missing Data\n", stderr);
-		close(connect_fd);
         return -1;
 	}
 	
 	//Create Timer to Prevent DOS Attacks
 	timer_t timer_id;
 	if(create_timer(&timer_id) == -1){
-		fputs("Timer Timed Out...\n", stderr);
-		close(connect_fd);
+		perror("In Function (verify_protocol), Error Creating POSIX Timer.\n\tNOTE:"
+			   " This Error Exits The Corresponding Function");
         return -1;
 	}
 	
@@ -345,122 +492,15 @@ int verify_protocol(int connect_fd){
 	//Verify Correct Secret Message
 	if(strcmp("<" SECRET ">\n", message_buffer) != 0){
 		write(connect_fd, error_message, strlen(error_message));
-		close(connect_fd);
 		return -1;
 	}
 
 	//Final OK Message
 	if(write(connect_fd, ok_message, strlen(ok_message)) < strlen(ok_message)){
 		fputs("Imcomplete Write: Missing Data\n", stderr);
-		close(connect_fd);
         return -1;
 	}
 	return 0;
-}
-
-
-void handle_bash(char *slave_name){
-
-	//Create New Session ID
-	if(setsid() == -1){
-		fputs("Error Creating New Session ID\n", stderr);
-		exit(EXIT_FAILURE);
-	}
-
-	//Open PTY Slave
-	int slave_fd = open(slave_name, O_RDWR | O_CLOEXEC);
-	if(slave_fd == -1){
-		fputs("Error Opening Slave File Descriptor\n", stderr);
-		exit(EXIT_FAILURE);
-	}
-
-	//Dup Redirection
-	if(dup2(slave_fd, STDOUT_FILENO) == -1 || dup2(slave_fd, STDERR_FILENO) == -1 || dup2(slave_fd, STDIN_FILENO) == -1){	
-		fputs("Error Dupping\n", stderr);
-		close(slave_fd);
-		exit(EXIT_FAILURE);
-	}
-
-	//Spawn Bash
-	if(execlp("bash", "bash", NULL) == -1){ 
-		fputs("Error Starting Bash from Server\n", stderr);
-		close(slave_fd);
-		exit(EXIT_FAILURE);
-	}
-}
-
-
-int create_pty_master(char *slave_name){
-	
-	//Variable to Hold Slave and Master fd and name
-	char *slave_temp;
-	int master_fd;
-	
-	//Opent PTY Master File Descriptor
-	if((master_fd = posix_openpt(O_RDWR | O_NOCTTY)) == -1){
-		fputs("Error Opening PTY\n", stderr);
-		return -1;
-	}
-	
-	//Set Up Close on Exec for Master File Descriptor
-	if(fcntl(master_fd, F_SETFD, FD_CLOEXEC) == -1){
-		fputs("Error Setting Up Close on Exec for Master\n", stderr);
-		close(master_fd);
-		return -1;
-	}
-	
-	//Unlock Slave PTY File Descriptor
-	if(unlockpt(master_fd) == -1){
-		fputs("Error Unlocking PTY\n", stderr);
-		close(master_fd);
-		return -1;
-	}
-	
-	//Get Slave Name 
-	slave_temp = ptsname(master_fd);
-	if(slave_temp == NULL){
-		fputs("Error Getting Slave Name\n", stderr);
-		close(master_fd);
-		return -1;
-	}
-	
-	//See if String is Able to Be Copied
-	if(strlen(slave_temp) >= MAX_BUFF){
-		fputs("Insufficient Storage for Slave Name\n", stderr);
-		close(master_fd);
-		return -1;
-	}
-	
-	//Copy String to New Location
-	strncpy(slave_name, slave_temp, MAX_BUFF);
-	
-	return master_fd;
-}
-
-void *epoll_select(){
-	
-	int ready, sourcefd;
-	struct epoll_event evlist[20];
-
-	//Loop and Find FD that are ready for IO
-	while ((ready = epoll_wait(epoll_fd, evlist, MAX_CLIENTS * 2, -1)) > 0) {
-		for (int i = 0; i < ready; i++) {
-	
-			//Check if Epoll was Invalid
-			if (evlist[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-				close(evlist[i].data.fd);
-				close(fd_pairs[evlist[i].data.fd]);
-				
-			}else if (evlist[i].events & EPOLLIN) {
-				//Data is ready to read so transfer:
-				sourcefd = evlist[i].data.fd;
-				if(transfer_data(sourcefd, fd_pairs[sourcefd]) == -1){
-					fputs("Error Transfer Data between client and server fd\n", stderr);
-				}
-			}
-		}
-	}
-	pthread_exit(NULL);
 }
 
 
@@ -472,31 +512,47 @@ int transfer_data(int read_fd, int write_fd){
 	//Memory Allocation Error Checking
 	if((read_buffer = malloc(sizeof(char) * MAX_BUFF)) == NULL){
 		fputs("Error Allocating Memory\n", stderr);
-		close(read_fd);
-		close(write_fd);
 		return -1;
 	}
 	
 	//Read from File Descriptor
 	if((chars_read = read(read_fd, read_buffer, MAX_BUFF)) <= 0){
 		fputs("Error reading from File Descriptor\n", stderr);
-		close(read_fd);
-		close(write_fd);
 		return -1;
 	}
 	
 	//Write to File Descriptor
 	if((write(write_fd, read_buffer, chars_read)) < chars_read){
 		fputs("Did not complete Write System call\n", stderr);
-		close(read_fd);
-		close(write_fd);
 		return -1;
 	}
 	return 0;
 }
 
 
-void timer_sig_handler(int sig){
-	/*Once a timer is set off, it interrupts a blocking read call
-	in the thread that called it*/
+int add_to_epoll(int client_fd, int master_fd){
+	
+	//Add Client Socket and Master PTY File Descriptors to Epoll
+	struct epoll_event ev;
+	ev.events = EPOLLIN;
+	
+  	ev.data.fd = client_fd;
+  	if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1){
+    	perror("In Function (add_to_epoll), Error Adding Client File Descriptor To"
+			   " Epoll Unit. \n\tNOTE: This Error Exits The Corresponding Function");
+		return -1;
+	}
+	
+	ev.data.fd = master_fd;
+    if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, master_fd, &ev) == -1){
+    	perror("In Function (add_to_epoll), Error Adding PTY Master File Descriptor To"
+			   " Epoll Unit. \n\tNOTE: This Error Exits The Corresponding Function");
+		return -1;
+	}
+
+	//Store Client File Descriptor and Master File Descriptor Pairs
+	fd_pairs[client_fd] = master_fd;
+	fd_pairs[master_fd] = client_fd;
+	
+	return 0;
 }
