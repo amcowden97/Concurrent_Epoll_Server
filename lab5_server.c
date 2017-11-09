@@ -62,16 +62,17 @@ int bash_pid;
 
 //Function Prototypes
 void timer_sig_handler(int sig);
-void handle_client(void *arg); 
 void handle_epoll();
 void handle_bash(char *slave_name);
 void accept_clients(int server_sockfd);
-int create_pty_master(char *slave_name);
+int create_pty_pair(char *slave_name);
 int create_socket(int *p_server_sockfd);
 int create_timer(timer_t *p_timer_id);
-int verify_protocol(int connect_fd);
+void verify_protocol(int connect_fd);
 int transfer_data(int read_fd, int write_fd);
 int add_to_epoll(int client_fd, int master_fd);
+void init_client(); 
+int init_ign_signals();
 
 
 
@@ -79,13 +80,11 @@ int main(){
 		
 	//Variable Declarations for Server Socket Side
 	int server_sockfd;
-		
-	//Eliminate Need for Child Proccess Collection
-	if(signal(SIGCHLD, SIG_IGN) == SIG_ERR){
-		perror("In Function (Main), Failed To Set Up SIGCHLD Signal To Be Ignored In" 
-			   " Order To Disregaurd Collecting Terminated Process Childern. This Call" 
-			   " Is Used To Collect the Terminated Bash Subprocess. \n\tNOTE This" 
-			   " Error Terminates The Server Program.\n");
+	
+	//Setup Signals To Be Ignored
+	if(init_ign_signals() == -1){
+		perror("In Function (Main), Failure To Set Up Signals To Be Ignored\n\tNOTE"
+			   " This Error Terminates The Server Program.\n");
 		exit(EXIT_FAILURE);
 	}
 	
@@ -106,6 +105,9 @@ int main(){
 		exit(EXIT_FAILURE); 
 	}
 	
+	//Create Client Object Memory Allocation Buffer
+	
+	
 	//Call Epoll Loop To Handle Accepting and Handling Clients
 	//This Call Will Run Indeffinently Unless an Error Occurs
 	handle_epoll();
@@ -120,41 +122,25 @@ void timer_sig_handler(int sig){
 }
 
 
-void *handle_client(void *arg){
+void init_client(){
 	
 	int master_fd, connect_fd;
 	char *slave_name;
-	
-	//Get Client File Descriptor
-	connect_fd = *(int*)arg;
-	free(arg);
 	
 	//Verify Valid Client
 	if(verify_protocol(connect_fd) == -1){
 		perror("In Function (handle_client), The Corresponding Client Timed Out Due To"
 			   " Incorrect Passphrase.\n\tNOTE: This Error Exits The Corresponding"
 			   " Thread Resulting In The Client Terminating.");
-		close(connect_fd);
-		pthread_exit(NULL);
-	}
-
-	//Dynamic Memory to Store Slave Name 
-	if((slave_name = malloc(MAX_BUFF * sizeof(char))) == NULL){
-			perror("In Function (handle_client), Error Allocating Memory To Store The"
-				   " PTY Slave Name To Pass To The Bash Process. \n\tNOTE: This Error"
-				   " Exits The Corresponding Thread Resulting In The Client"
-				   " Terminating.");
-		close(connect_fd);
-		pthread_exit(NULL);
+		return -1;
 	}
 
 	//Open PTY and get Master and Slaves
-	if((master_fd = create_pty_master(slave_name)) == -1){
-			perror("In Function (handle_client), Failure To Create The PTY Master And"
-				   " Slave Pairs.\n\tNOTE: This Error Exits The Corresponding Thread"
-				   " Resulting In The Client Terminating.");
-		close(connect_fd);
-		pthread_exit(NULL);
+	if((master_fd = create_pty_pair(slave_name)) == -1){
+		perror("In Function (handle_client), Failure To Create The PTY Master And"
+			   " Slave Pairs.\n\tNOTE: This Error Exits The Corresponding Thread"
+			   " Resulting In The Client Terminating.");
+		return -1;
 
 	}
 	
@@ -164,9 +150,7 @@ void *handle_client(void *arg){
 			   " Corresponding PTY Master File Descriptor To Epoll Unit. \n\tNOTE:"
 			   " This Error Exits The Corresponding Thread Resulting In The Client"
 			   " Terminating.");
-		close(connect_fd);
-		close(master_fd);
-		pthread_exit(NULL);
+		return -1;
 	}
 	
 	//Handle Bash in Subprocess
@@ -179,10 +163,9 @@ void *handle_client(void *arg){
 				   " Of The Fork Call Making A New Process To Run The Client's Bash"
 				   " Session. \n\tNOTE: This Error Exits The Corresponding Thread"
 				   " Resulting In The Client Terminating.");
-			close(connect_fd);
-			close(master_fd);
+			return -1;
 	}
-	pthread_exit(NULL);
+	return 0;
 }
 
 
@@ -234,29 +217,31 @@ void handle_bash(char *slave_name){
 	//Open PTY Slave
 	int slave_fd = open(slave_name, O_RDWR | O_CLOEXEC);
 	if(slave_fd == -1){
-			perror("In Function (handle_bash), Error Opening Slave File Descriptor For"
-				   " PTY. \n\tNOTE: This Error Exits The Corresponding Bash Process"
-				   " Resulting In The Client Terminating.");
+		perror("In Function (handle_bash), Error Opening Slave File Descriptor For"
+			   " PTY. \n\tNOTE: This Error Exits The Corresponding Bash Process"
+			   " Resulting In The Client Terminating.");
 		exit(EXIT_FAILURE);
 	}
 	
 	free(slave_name);
 
 	//Dup Redirection
-	if(dup2(slave_fd, STDOUT_FILENO) == -1 || dup2(slave_fd, STDERR_FILENO) == -1 || dup2(slave_fd, STDIN_FILENO) == -1){	
-			perror("In Function (handle_bash), Error Redirecting PTY Slave File"
-				   " Descriptor To STDIN STDOUT And STDERR For User. \n\tNOTE: This"
-				   " Error Exits The Corresponding Bash Process Resulting In The"
-				   " Client Terminating.");
+	if(dup2(slave_fd, STDOUT_FILENO) == -1 || dup2(slave_fd, STDERR_FILENO) == -1 
+	   || dup2(slave_fd, STDIN_FILENO) == -1){	
+		
+		perror("In Function (handle_bash), Error Redirecting PTY Slave File"
+			   " Descriptor To STDIN STDOUT And STDERR For User. \n\tNOTE: This"
+			   " Error Exits The Corresponding Bash Process Resulting In The"
+			   " Client Terminating.");
 		close(slave_fd);
 		exit(EXIT_FAILURE);
 	}
 
 	//Spawn Bash
 	if(execlp("bash", "bash", NULL) == -1){ 
-			perror("In Function (handle_bash), Error Execing Bash Process For Client"
-				   " Interaction. \n\tNOTE: This Error Exits The Corresponding Bash"
-				   " Process Resulting In The Client Terminating.");
+		perror("In Function (handle_bash), Error Execing Bash Process For Client"
+			   " Interaction. \n\tNOTE: This Error Exits The Corresponding Bash"
+			   " Process Resulting In The Client Terminating.");
 		close(slave_fd);
 		exit(EXIT_FAILURE);
 	}
@@ -271,14 +256,15 @@ void accept_clients(int server_sockfd){
     socklen_t client_len = sizeof(client_address);
 	
 	//Server Loop to Accept Clients
-    while((client_sockfd = accept4(server_sockfd, (struct sockaddr *) &client_address, &client_len, SOCK_CLOEXEC)) > 0){
+    while((client_sockfd = accept4(server_sockfd, (struct sockaddr *) &client_address, &client_len, 
+								   SOCK_CLOEXEC | SOCK_NONBLOCK)) > 0){
  
 	
 	}
 }
 
 
-int create_pty_master(char *slave_name){
+int create_pty_pair(char *slave_name){
 	
 	//Variable to Hold Slave and Master fd and name
 	char *slave_temp;
@@ -291,8 +277,8 @@ int create_pty_master(char *slave_name){
 		return -1;
 	}
 	
-	//Set Up Close on Exec for Master File Descriptor
-	if(fcntl(master_fd, F_SETFD, FD_CLOEXEC) == -1){
+	//Set Up Close on Exec and Nonblocking for Master File Descriptor
+	if(fcntl(master_fd, F_SETFD, FD_CLOEXEC | O_NONBLOCK) == -1){
 		perror("In Function (create_pty_master), Error Setting Up Close On Exec For"
 			   " The PTY Master File Descriptor. \n\tNOTE: This Error Exits The"
 			   " Corresponding Function.");
@@ -305,6 +291,15 @@ int create_pty_master(char *slave_name){
 		perror("In Function (create_pty_master), Error Unlocking The PTY Master File"
 			   " Descriptor In Order To Get The PTY Slave Pairing For The PTY."
 			   " \n\tNOTE: This Error Exits The Corresponding Function.");
+		close(master_fd);
+		return -1;
+	}
+	
+	//Dynamic Memory to Store Slave Name 
+	if((slave_name = malloc(MAX_BUFF * sizeof(char))) == NULL){
+		perror("In Function (create_pty_master), Error Allocating Memory To Store"
+			   " PTY Slave Name To Pass To The Bash Process. \n\tNOTE: This Error"
+			   " Exits The Corresponding Function.");
 		close(master_fd);
 		return -1;
 	}
@@ -346,10 +341,10 @@ int create_socket(int *p_server_sockfd){
     server_address.sin_port = htons(PORT);
    
 	//Socket Initialization
-    if((*p_server_sockfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) == -1){
-			perror("In Function (create_socket), Failed To Create Server Side"
-				  " Of The Connection Socket. \n\tNOTE: This Error Exits The"
-				  " Corresponding Function.");
+    if((*p_server_sockfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) == -1){
+		perror("In Function (create_socket), Failed To Create Server Side"
+			  " Of The Connection Socket. \n\tNOTE: This Error Exits The"
+			  " Corresponding Function.");
 		return -1;
 	}
 		
@@ -427,7 +422,7 @@ int create_timer(timer_t *p_timer_id){
 }
 
 
-int verify_protocol(int connect_fd){
+void verify_protocol(int connect_fd){
 	
 	//Variables for Reading and Writing
 	char *message_buffer;
@@ -520,5 +515,27 @@ int add_to_epoll(int client_fd, int master_fd){
 	fd_pairs[client_fd] = master_fd;
 	fd_pairs[master_fd] = client_fd;
 	
+	return 0;
+}
+
+
+int init_ign_signals(){
+	
+	//Eliminate Need for Child Proccess Collection
+	if(signal(SIGCHLD, SIG_IGN) == SIG_ERR){
+		perror("In Function (init_ign_signals), Failed To Set Up SIGCHLD Signal To Be Ignored In" 
+			   " Order To Disregaurd Collecting Terminated Process Childern. This Call" 
+			   " Is Used To Collect the Terminated Bash Subprocess. \n\tNOTE This" 
+			   " Error Terminates The Corresponding Function.\n");
+		return -1;
+	}
+	
+	//Ignore SIGPIPE Signal To Prevent Clients Crashing Server
+	if(signal(SIGPIPE, SIG_IGN) == SIG_ERR){
+		perror("In Function (init_ign_signals), Failed To Set Up SIGPIPE Signal To Be Ignored In" 
+			   " Order To Prevent Clients From Crashing Server Process On Abnormal Termination" 
+			   " \n\tNOTE This Error Terminates The Corresponding Function.\n");
+		return -1;
+	}
 	return 0;
 }
