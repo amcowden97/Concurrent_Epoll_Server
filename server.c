@@ -56,17 +56,19 @@ A Note About Dyanmic Memory Allocation:
 
 //Function Prototypes
 //void timer_sig_handler(int sig);
-int handle_client(int client_fd); 
+int init_client(int client_fd); 
 void handle_bash(char *slave_name);
-void *handle_epoll();
+void handle_epoll();
 int create_pty_pair(char *slave_name);
-int create_socket(int *p_server_fd);
+int create_socket();
 //int create_timer(timer_t *p_timer_id);
 int verify_protocol(int client_fd);
 void transfer_data(int source);
 int add_to_epoll(int source_fd);
 int init_client_obj(int client_fd);
-int accept_clients(int server_fd);
+void accept_clients(int server_fd);
+void dispatch_operation(int source_fd);
+int send_protocol(int client_fd);
 
 typedef enum {NEW, ESTABLISHED, UNWRITTEN, TERMINATED} Status;
 
@@ -86,13 +88,8 @@ int fd_pairs[MAX_CLIENTS * 2 + 5];
 Client **client_pairs;
 
 
-
-
 int main(){
-		
-	//Variable Declarations for Threads
-	pthread_t rw_thread;
-	
+			
 	//Eliminate Need for Child Proccess Collection
 	if(signal(SIGCHLD, SIG_IGN) == SIG_ERR){
 		perror("\nIn Function (Main), Failed To Set Up SIGCHLD Signal To Be Ignored In" 
@@ -103,7 +100,7 @@ int main(){
 	}
 	
 	//Create Socket and Bind it with Corresponding Address
-	if(create_socket(&server_fd) == -1){
+	if(create_socket() == -1){
 		perror("\nIn Function (Main), Failed To Create Socket And Initialize Socket By"
 			   " Calling The Function (create_socket). NOTE This Error Terminates"
 			   " The Server Program.\n");
@@ -126,45 +123,51 @@ int main(){
 		exit(EXIT_FAILURE);
 	}
 	
-	//Create Thread to Handle File Descriptor Selection and Read/Write
-	if(pthread_create(&rw_thread, NULL, handle_epoll, NULL) == -1){
-		perror("\nIn Function (Main), Failed To Create POSIX Thread To Handle Epoll"
-			   " Unit For File Descriptor Read And Write. NOTE This Error" 
-			   " Terminates The Server Program.\n");
-		exit(EXIT_FAILURE); 
+	//Add Server File Descriptor to Epoll Unit
+	if(add_to_epoll(server_fd) == -1){
+		perror("\nIn Function (main), Failed To Add Server File Descriptor" 
+			   " To Epoll Unit. NOTE: This Error Results In The Server Terminating.");
+		exit(EXIT_FAILURE);
 	}
-
-	//Loop To Accept Clients
-	if((accept_clients(server_fd) == -1)){
-		perror("\nIn Function (Main). NOTE An Error Occurred Causing The"
-			   " Infinite Server Loop To Terminate Causing The Server To Crash.\n");
-	}
+	
+	//Call Function To Handle Epoll Selection
+	handle_epoll();
+	
 	exit(EXIT_FAILURE);
 }
 
-int accept_clients(int server_fd){
+void accept_clients(int server_fd){
 	
 	struct sockaddr_in client_address;
     socklen_t client_len = sizeof(client_address);
 	int client_fd;
 	
-	//Infinite Server Loop to Handle Clients
-    while(1){
-        
-		//Accept Client
-        if((client_fd = accept4(server_fd, (struct sockaddr *) &client_address, &client_len, SOCK_CLOEXEC)) == -1){
-			perror("\nIn Function (Main - Server Loop), Failed To Accept Client Socket"
-				   " Address Connection. NOTE This Error Causes The Server"
-				   " Loop To Start At the Beginnnig Of Its Execution To Accept"
-				   " More Clients.\n");
+	//Server Loop to Accept Clients
+    while((client_fd = accept4(server_fd, (struct sockaddr *) &client_address,
+							   &client_len, SOCK_CLOEXEC | SOCK_NONBLOCK)) > 0){
+		
+		//Initialize Client Struct
+		if(init_client_obj(client_fd) == -1){
+			perror("\nIn Function (accept_clients), Error Initializing Client"
+				   " Struct. NOTE This Ends The Client Connection.\n");
+			close(client_fd);
 			continue;
 		}
 		
-		init_client_obj(client_fd);
+		//Add Client File Descriptor to Epoll Unit
+		if(add_to_epoll(client_fd) == -1){
+			perror("\nIn Function (accept_clients), Failed To Add Client File Descriptor" 
+				   " To Epoll Unit. NOTE: This Error Results In The Client Terminating.");
+			close(client_fd);
+		}
 		
-		handle_client(client_fd);
+		//Send First Part Of Protocol Verification
+		if(send_protocol(client_fd) == -1){
+			perror("\nIn Function (accept_clients), Error Sending Rembash"
+				   " Protocol. NOTE This Ends The Client Connection.\n");
+			close(client_fd);
+		}
 	}
-	return -1;
 }
 
 
@@ -180,7 +183,67 @@ int init_client_obj(int client_fd){
 	//Set Client State
 	client_pairs[client_fd]->state = NEW;
 	client_pairs[client_fd]->client_fd = client_fd;
-	client_pairs[client_fd]->master_fd = -1;	//Mark For Epoll Unit
+	return 0;
+}
+
+
+int send_protocol(int client_fd){
+	
+	const char * const rembash_message = "<rembash>\n";
+	
+	//Rembash Send
+	if(write(client_fd, rembash_message, strlen(rembash_message)) < strlen(rembash_message)){
+		perror("\nIn Function (send_protocol), Error Sending Rembash Protocol Message To"
+			   " Client. NOTE This Error Causes The Client To Terminate.\n");
+        return -1;
+	}
+	return 0;
+}
+
+
+int verify_protocol(int client_fd){
+	
+	//Variables for Reading and Writing
+	char *message_buffer;
+	const char * const error_message = "<error>\n";
+	const char * const ok_message = "<ok>\n";
+	
+	/*//Create Timer to Prevent DOS Attacks
+	timer_t timer_id;
+	if(create_timer(&timer_id) == -1){
+		perror("In Function (verify_protocol), Error Creating POSIX Timer.\n\tNOTE:"
+			   " This Error Exits The Corresponding Function");
+        return -1;
+	}*/
+	
+	//Secret Message Recieving 
+	message_buffer = readline(client_fd);
+	
+	/*//Disarm Timer
+	timer_delete(timer_id);*/
+	
+	//Verify Correct Secret Message
+	if(strcmp("<" SECRET ">\n", message_buffer) != 0){
+		write(client_fd, error_message, strlen(error_message));
+		return -1;
+	}
+
+	//Final OK Message
+	if(write(client_fd, ok_message, strlen(ok_message)) < strlen(ok_message)){
+		perror("\nIn Function (verify_protocol), Error Sending OK Message"
+			   " Message To Client. NOTE This Error Causes The Client To Terminate.\n");
+        return -1;
+	}
+	
+	//Initialize Client
+	if(init_client(client_fd) == -1){
+		perror("\nIn Function (verify_protocol), Error Initalizing Client With PTY And"
+			   " Bash Subprocess. NOTE: This Error Closes The Client.");
+		close(client_fd);
+	}
+	
+	//Mark Client Object as a Valid Client
+	client_pairs[client_fd]->state = ESTABLISHED;
 	
 	return 0;
 }
@@ -192,24 +255,14 @@ int init_client_obj(int client_fd){
 }*/
 
 
-int handle_client(int client_fd){
+int init_client(int client_fd){
 	
 	int master_fd;
 	char *slave_name;
 	
-	//Verify Valid Client
-	if(verify_protocol(client_fd) == -1){
-		perror("\nIn Function (handle_client), The Corresponding Client Timed Out Due To"
-			   " Incorrect Passphrase. NOTE: This Error Exits The Corresponding"
-			   " Thread Resulting In The Client Terminating.");
-		close(client_fd);
-		return -1;
-	}
-	
-	
 	//Dynamic Memory to Store Slave Name 
 	if((slave_name = malloc(MAX_BUFF * sizeof(char))) == NULL){
-		perror("\nIn Function (handle_client), Error Allocating Memory To Store The"
+		perror("\nIn Function (init_client), Error Allocating Memory To Store The"
 			   " PTY Slave Name To Pass To The Bash Process. NOTE: This Error"
 			   " Exits The Corresponding Thread Resulting In The Client"
 			   " Terminating.");
@@ -219,7 +272,7 @@ int handle_client(int client_fd){
 
 	//Open PTY and get Master and Slaves
 	if((master_fd = create_pty_pair(slave_name)) == -1){
-			perror("\nIn Function (handle_client), Failure To Create The PTY Master And"
+			perror("\nIn Function (init_client), Failure To Create The PTY Master And"
 				   " Slave Pairs. NOTE: This Error Exits The Corresponding Thread"
 				   " Resulting In The Client Terminating.");
 		close(client_fd);
@@ -234,19 +287,9 @@ int handle_client(int client_fd){
 	fd_pairs[client_fd] = master_fd;
 	fd_pairs[master_fd] = client_fd;
 	
-	//Add Client File Descriptor to Epoll Unit
-	if(add_to_epoll(client_fd) == -1){
-		perror("\nIn Function (handle_client), Failed To Add Client File Descriptor" 
-			   " To Epoll Unit. NOTE: This Error Exits The Corresponding Thread"
-			   " Resulting In The Client Terminating.");
-		close(client_fd);
-		close(master_fd);
-		return -1;
-	}
-	
 	//Add Master File Descriptor to Epoll Unit
 	if(add_to_epoll(master_fd) == -1){
-		perror("\nIn Function (handle_client), Failed To Add Master File Descriptor" 
+		perror("\nIn Function (init_client), Failed To Add Master File Descriptor" 
 			   " To Epoll Unit. NOTE: This Error Exits The Corresponding Thread"
 			   " Resulting In The Client Terminating.");
 		close(client_fd);
@@ -260,7 +303,7 @@ int handle_client(int client_fd){
 			handle_bash(slave_name);
 		break;
 		case -1:
-			perror("\nIn Function (handle_client), This Error Results From The Failure"
+			perror("\nIn Function (init_client), This Error Results From The Failure"
 				   " Of The Fork Call Making A New Process To Run The Client's Bash"
 				   " Session. NOTE: This Error Exits The Corresponding Thread"
 				   " Resulting In The Client Terminating.");
@@ -314,13 +357,13 @@ void handle_bash(char *slave_name){
 }
 
 
-void *handle_epoll(){
+void handle_epoll(){
 	
 	int ready, source_fd;
 	struct epoll_event evlist[20];
 	
 	//Initialize Thread Pool Function
-	tpool_init(transfer_data);
+	tpool_init(dispatch_operation);
 
 	//Loop and Find FD that are ready for IO
 	while ((ready = epoll_wait(epoll_fd, evlist, MAX_CLIENTS * 2, -1)) > 0) {
@@ -341,7 +384,46 @@ void *handle_epoll(){
 	perror("\nIn Function (handle_epoll - Epoll Loop). NOTE An Error Occurred"
 		   " Causing The Infinite Epoll Loop To Terminate Causing The Server To"
 		   " Crash.\n");
-	pthread_exit(NULL);
+}
+
+void dispatch_operation(int source_fd){
+	
+	if(source_fd == server_fd){	 //Accept Clients State
+		accept_clients(source_fd);
+		
+	}else{							
+		
+		switch(client_pairs[source_fd]->state){ //Client Object Case	
+			case NEW:
+				verify_protocol(source_fd);
+				break;
+				
+			case ESTABLISHED:
+				transfer_data(source_fd);
+				break;
+				
+			case UNWRITTEN:
+				perror("Partial Write Case");
+				break;
+				
+			case TERMINATED:
+				perror("Terminated Case");
+				break;
+				
+			default:
+				perror("Something");
+		}
+	}
+	
+	//Reset File Descriptor To Properly Use Epoll's ONESHOT OPTION
+	struct epoll_event ev;
+	ev.events = EPOLLIN | EPOLLONESHOT;
+
+	ev.data.fd = source_fd;
+	if(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, source_fd, &ev) == -1){
+		perror("\nIn Function (add_to_epoll), Error Adding Client File Descriptor To"
+			   " Epoll Unit. NOTE: This Error Exits The Corresponding Function");
+	}
 }
 
 
@@ -359,7 +441,7 @@ int create_pty_pair(char *slave_name){
 	}
 	
 	//Set Up Close on Exec for Master File Descriptor
-	if(fcntl(master_fd, F_SETFD, FD_CLOEXEC) == -1){
+	if(fcntl(master_fd, F_SETFD, FD_CLOEXEC | O_NONBLOCK) == -1){
 		perror("\nIn Function (create_pty_pair), Error Setting Up Close On Exec For"
 			   " The PTY Master File Descriptor. NOTE: This Error Exits The"
 			   " Corresponding Function.");
@@ -401,7 +483,7 @@ int create_pty_pair(char *slave_name){
 }
 
 
-int create_socket(int *p_server_fd){
+int create_socket(){
 	
 	//Listening Socket Constant
 	const int MAX_BACKLOG = 5;
@@ -413,7 +495,7 @@ int create_socket(int *p_server_fd){
     server_address.sin_port = htons(PORT);
    
 	//Socket Initialization
-    if((*p_server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) == -1){
+    if((server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) == -1){
 			perror("\nIn Function (create_socket), Failed To Create Server Side"
 				  " Of The Connection Socket. NOTE: This Error Exits The"
 				  " Corresponding Function.");
@@ -421,7 +503,7 @@ int create_socket(int *p_server_fd){
 	}
 		
 	//Bind Address with Socket
-    if(bind(*p_server_fd, (struct sockaddr *) &server_address, sizeof(server_address)) == -1){
+    if(bind(server_fd, (struct sockaddr *) &server_address, sizeof(server_address)) == -1){
 		perror("\nIn Function (create_socket), Failed To Bind The Server Socket File"
 			   " Descriptor And The Wanted IP Address and Port Number. NOTE: This"
 			   " Error Exits The Corresponding Function.");
@@ -429,7 +511,7 @@ int create_socket(int *p_server_fd){
 	}
 	
 	//Listen for Connections on Socket
-    if(listen(*p_server_fd, MAX_BACKLOG) == -1){
+    if(listen(server_fd, MAX_BACKLOG) == -1){
 		perror("\nIn Function (create_socket), Failed To Set The Listening Socket As A"
 			   " Passive Socket To Accept Incoming Client Connections. NOTE: This"
 			   " Error Exits The Corresponding Function.");
@@ -438,7 +520,7 @@ int create_socket(int *p_server_fd){
 	
 	//Set Addresss Reuse in Termination
 	int i=1;
-	if(setsockopt(*p_server_fd, SOL_SOCKET, SO_REUSEADDR, &i, sizeof(i)) == -1){
+	if(setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &i, sizeof(i)) == -1){
 		perror("\nIn Function (create_socket), Failed To Set The Address Of The"
 			   " Socket To Be Reused In The Event Of Termination To Enhance Testing."
 			   " NOTE: This Error Exits The Corresponding Function.");
@@ -494,52 +576,6 @@ int create_socket(int *p_server_fd){
 }*/
 
 
-int verify_protocol(int client_fd){
-	
-	//Variables for Reading and Writing
-	char *message_buffer;
-	const char * const rembash_message = "<rembash>\n";
-	const char * const error_message = "<error>\n";
-	const char * const ok_message = "<ok>\n";
-	
-	//Rembash Send
-	if(write(client_fd, rembash_message, strlen(rembash_message)) < strlen(rembash_message)){
-		fputs("Imcomplete Write: Missing Data\n", stderr);
-        return -1;
-	}
-	
-	/*//Create Timer to Prevent DOS Attacks
-	timer_t timer_id;
-	if(create_timer(&timer_id) == -1){
-		perror("In Function (verify_protocol), Error Creating POSIX Timer.\n\tNOTE:"
-			   " This Error Exits The Corresponding Function");
-        return -1;
-	}*/
-	
-	//Secret Message Recieving 
-	message_buffer = readline(client_fd);
-	
-	/*//Disarm Timer
-	timer_delete(timer_id);*/
-	
-	//Verify Correct Secret Message
-	if(strcmp("<" SECRET ">\n", message_buffer) != 0){
-		write(client_fd, error_message, strlen(error_message));
-		return -1;
-	}
-
-	//Final OK Message
-	if(write(client_fd, ok_message, strlen(ok_message)) < strlen(ok_message)){
-		fputs("Imcomplete Write: Missing Data\n", stderr);
-        return -1;
-	}
-	
-	//Mark Client Object as a Valid Client
-	client_pairs[client_fd]->state = ESTABLISHED;
-	return 0;
-}
-
-
 void transfer_data(int source_fd){
 	
 	static char *read_buffer; 
@@ -547,35 +583,24 @@ void transfer_data(int source_fd){
 	
 	//Memory Allocation Error Checking
 	if((read_buffer = malloc(sizeof(char) * MAX_BUFF)) == NULL){
-		fputs("Error Allocating Memory\n", stderr);
+		perror("\nIn Function (transfer_data), Error Setting Up Read Buffer"
+			   " For Reading And Writing. NOTE: This Error Exits The"
+			   " Corresponding Function");
 		return;
 	}
-	
-	//Check if it is valid
-	if(client_pairs[source_fd]->state != ESTABLISHED){
-		return;
-	}
-	
+		
 	//Read from File Descriptor
 	if((chars_read = read(source_fd, read_buffer, MAX_BUFF)) <= 0){
-		fputs("Error reading from File Descriptor\n", stderr);
+		perror("\nIn Function (transfer_data), Error Reading... NOTE: This Error Exits"
+			   " The Corresponding Function");
 		return;
 	}
 	
 	//Write to File Descriptor
 	if((write(fd_pairs[source_fd], read_buffer, chars_read)) < chars_read){
-		fputs("Did not complete Write System call\n", stderr);
+		perror("\nIn Function (transfer_data), Error Writing... NOTE: This Error Exits"
+			   " The Corresponding Function");
 		return;
-	}
-	
-	//Reset File Descriptor To Properly Use Epoll's ONESHOT OPTION
-	struct epoll_event ev;
-	ev.events = EPOLLIN | EPOLLONESHOT;
-
-	ev.data.fd = source_fd;
-	if(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, source_fd, &ev) == -1){
-		perror("\nIn Function (add_to_epoll), Error Adding Client File Descriptor To"
-			   " Epoll Unit. NOTE: This Error Exits The Corresponding Function");
 	}
 }
 
