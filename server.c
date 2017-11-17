@@ -45,6 +45,7 @@ A Note About Dyanmic Memory Allocation:
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <errno.h>
 #include "readline.c"
 #include "tpool.h"
 
@@ -578,16 +579,8 @@ int create_socket(){
 
 void transfer_data(int source_fd){
 	
-	static char *read_buffer; 
+	static char read_buffer[MAX_BUFF]; 
 	int chars_read = 0;
-	
-	//Memory Allocation Error Checking
-	if((read_buffer = malloc(sizeof(char) * MAX_BUFF)) == NULL){
-		perror("\nIn Function (transfer_data), Error Setting Up Read Buffer"
-			   " For Reading And Writing. NOTE: This Error Exits The"
-			   " Corresponding Function");
-		return;
-	}
 		
 	//Read from File Descriptor
 	if((chars_read = read(source_fd, read_buffer, MAX_BUFF)) <= 0){
@@ -598,9 +591,16 @@ void transfer_data(int source_fd){
 	
 	//Write to File Descriptor
 	if((write(fd_pairs[source_fd], read_buffer, chars_read)) < chars_read){
-		perror("\nIn Function (transfer_data), Error Writing... NOTE: This Error Exits"
-			   " The Corresponding Function");
-		return;
+		
+		//Partial Write Case	
+		if(errno == EAGAIN){
+			perror("Partital Write Case");
+			
+		//True Error Writing Case
+		}else{								
+			perror("\nIn Function (transfer_data), Error Writing... NOTE: This Error Exits"
+				   " The Corresponding Function");
+		}
 	}
 }
 
