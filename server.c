@@ -70,12 +70,15 @@ int init_client_obj(int client_fd);
 void accept_clients(int server_fd);
 void dispatch_operation(int source_fd);
 int send_protocol(int client_fd);
+void unwritten_data(int source_fd);
+void rearm_epoll(int source_fd, int in_or_out);
 
 typedef enum {NEW, ESTABLISHED, UNWRITTEN, TERMINATED} Status;
 
 typedef struct client_t{
 	
-	char *partial_write;
+	char *unwritten;
+	int unwritten_num;
 	int client_fd;
 	int master_fd;
 	Status state;
@@ -160,6 +163,7 @@ void accept_clients(int server_fd){
 			perror("\nIn Function (accept_clients), Failed To Add Client File Descriptor" 
 				   " To Epoll Unit. NOTE: This Error Results In The Client Terminating.");
 			close(client_fd);
+			continue;
 		}
 		
 		//Send First Part Of Protocol Verification
@@ -176,8 +180,8 @@ int init_client_obj(int client_fd){
 	
 	//Create Client Object
 	if((client_pairs[client_fd] = malloc(sizeof(Client))) == NULL){
-		perror("\nIn Function (init_client_obj), Error Allocating Memory To Hold Client"
-			   " Structure. NOTE An Error Occurred Causing The Infinite Server"
+		perror("\nIn Function (init_client_obj), Error Allocating Memory To Hold"
+			   " Client Structure. NOTE An Error Occurred Causing The Infinite Server"
 			   " Loop To Terminate Causing The Server To Crash.\n");
 	}
 
@@ -194,8 +198,8 @@ int send_protocol(int client_fd){
 	
 	//Rembash Send
 	if(write(client_fd, rembash_message, strlen(rembash_message)) < strlen(rembash_message)){
-		perror("\nIn Function (send_protocol), Error Sending Rembash Protocol Message To"
-			   " Client. NOTE This Error Causes The Client To Terminate.\n");
+		perror("\nIn Function (send_protocol), Error Sending Rembash Protocol Message"
+			   " To Client. NOTE This Error Causes The Client To Terminate.\n");
         return -1;
 	}
 	return 0;
@@ -367,15 +371,17 @@ void handle_epoll(){
 	tpool_init(dispatch_operation);
 
 	//Loop and Find FD that are ready for IO
-	while ((ready = epoll_wait(epoll_fd, evlist, MAX_CLIENTS * 2, -1)) > 0) {
+	while ((ready = epoll_wait(epoll_fd, evlist, MAX_CLIENTS * 2, -1)) > 0){
 		for (int i = 0; i < ready; i++) {
 	
 			//Check if Epoll was Invalid
-			if (evlist[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+			if (evlist[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)){
+				
+				client_pairs[source_fd]->state = TERMINATED;
 				close(evlist[i].data.fd);
 				close(fd_pairs[evlist[i].data.fd]);
 				
-			}else if (evlist[i].events & EPOLLIN) {
+			}else if ((evlist[i].events & EPOLLIN) || (evlist[i].events & EPOLLOUT)){
 				//Data is ready to read so transfer:
 				source_fd = evlist[i].data.fd;
 				tpool_add_task(source_fd);
@@ -387,16 +393,19 @@ void handle_epoll(){
 		   " Crash.\n");
 }
 
+
 void dispatch_operation(int source_fd){
-	
+		
 	if(source_fd == server_fd){	 //Accept Clients State
 		accept_clients(source_fd);
+		rearm_epoll(source_fd, 0);
 		
 	}else{							
 		
 		switch(client_pairs[source_fd]->state){ //Client Object Case	
 			case NEW:
 				verify_protocol(source_fd);
+				rearm_epoll(source_fd, 0);
 				break;
 				
 			case ESTABLISHED:
@@ -404,26 +413,71 @@ void dispatch_operation(int source_fd){
 				break;
 				
 			case UNWRITTEN:
-				perror("Partial Write Case");
+				unwritten_data(source_fd);
 				break;
 				
 			case TERMINATED:
-				perror("Terminated Case");
-				break;
+				perror("Terminated Case................................................................................................................................................");
+				return;
 				
 			default:
 				perror("Something");
 		}
 	}
-	
-	//Reset File Descriptor To Properly Use Epoll's ONESHOT OPTION
-	struct epoll_event ev;
-	ev.events = EPOLLIN | EPOLLONESHOT;
+}
 
+
+void rearm_epoll(int source_fd, int in_or_out){
+
+	struct epoll_event ev;
 	ev.data.fd = source_fd;
+	
+	//Choose EPOLLIN or EPOLLOUT
+	switch(in_or_out){
+		case 0:
+			ev.events = EPOLLIN | EPOLLONESHOT;
+			break;
+		case 1:
+			ev.events = EPOLLOUT | EPOLLONESHOT;
+	}
+
+	//Reset File Descriptor To Properly Use Epoll's ONESHOT OPTION
 	if(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, source_fd, &ev) == -1){
-		perror("\nIn Function (add_to_epoll), Error Adding Client File Descriptor To"
-			   " Epoll Unit. NOTE: This Error Exits The Corresponding Function");
+		perror("\nIn Function (rearm_epoll), Error Rearming Source File"
+			   " Descriptor For EPOLLONESHOT. NOTE: This Error Exits The Corresponding"
+			   " Function");
+	}
+}
+
+void unwritten_data(int source_fd){
+	
+	int chars_read = client_pairs[source_fd]->unwritten_num, chars_written = 0;
+			
+
+		
+	//Write to File Descriptor
+	if((chars_written = write(fd_pairs[source_fd],  client_pairs[source_fd]->unwritten,
+							  chars_read)) < chars_read){
+		
+		//Partial Write Case	
+		if(errno == EAGAIN){
+			client_pairs[source_fd]->unwritten = (client_pairs[source_fd]->unwritten + chars_written);
+			client_pairs[source_fd]->unwritten_num = chars_read - chars_written;
+			client_pairs[source_fd]->state = UNWRITTEN;
+			
+			rearm_epoll(source_fd, 1);
+
+		//True Error Writing Case
+		}else{								
+			perror("\nIn Function (unwritten_data), Error Writing... NOTE: This Error"
+				   " Exits The Corresponding Function");
+			client_pairs[source_fd]->state = TERMINATED;
+		}
+		
+	//Successful Write Case
+	}else{
+		client_pairs[source_fd]->state = ESTABLISHED;
+		rearm_epoll(source_fd, 0);
 	}
 }
 
@@ -580,27 +634,35 @@ int create_socket(){
 void transfer_data(int source_fd){
 	
 	static char read_buffer[MAX_BUFF]; 
-	int chars_read = 0;
+	int chars_read = 0, chars_written = 0;
 		
 	//Read from File Descriptor
-	if((chars_read = read(source_fd, read_buffer, MAX_BUFF)) <= 0){
+	if((chars_read = read(source_fd, read_buffer, MAX_BUFF)) < 0){
 		perror("\nIn Function (transfer_data), Error Reading... NOTE: This Error Exits"
 			   " The Corresponding Function");
+		client_pairs[source_fd]->state = TERMINATED;
 		return;
 	}
 	
 	//Write to File Descriptor
-	if((write(fd_pairs[source_fd], read_buffer, chars_read)) < chars_read){
+	if((chars_written = write(fd_pairs[source_fd], read_buffer, chars_read))
+	   < chars_read){
 		
 		//Partial Write Case	
 		if(errno == EAGAIN){
-			perror("Partital Write Case");
+			client_pairs[source_fd]->unwritten = (read_buffer + chars_written);
+			client_pairs[source_fd]->unwritten_num = chars_read - chars_written;
+			client_pairs[source_fd]->state = UNWRITTEN;
+			
+			rearm_epoll(source_fd, 1);
 			
 		//True Error Writing Case
 		}else{								
-			perror("\nIn Function (transfer_data), Error Writing... NOTE: This Error Exits"
-				   " The Corresponding Function");
+			perror("\nIn Function (transfer_data), Error Writing... NOTE: This Error Exits The Corresponding Function");
 		}
+	//Default Successful Write Case
+	}else{
+		rearm_epoll(source_fd, 0);
 	}
 }
 
