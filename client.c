@@ -22,8 +22,8 @@ struct termios saved_attributes;
 int main(int argc, char *argv[]){
 	
 	//Function Prototypes
-	int handle_rembash(int sockfd);
 	void sigchild_handler(int sig);
+	int handle_rembash(int sockfd);
 	int setup_socket(char *address);
 	int socket_input(int sockfd);
 	int socket_output(int sockfd);
@@ -32,7 +32,8 @@ int main(int argc, char *argv[]){
 	
 	//Command Line Argument Validation
 	if(argc != 2){
-		fputs("Incorrect Argument Number: Usage = IP Address as Argument\n", stderr);
+		perror("\nIn Function (Main), Incorrect Number of Arguments. NOTE: This"
+			   " Terminates The Client Program.\n");
 		exit(EXIT_FAILURE);
 	}
 	
@@ -40,19 +41,22 @@ int main(int argc, char *argv[]){
 	int sockfd;
 	
 	if((sockfd = setup_socket(argv[1])) == -1){
-		fputs("Error Creating Socket\n", stderr);
+		perror("\nIn Function (Main), Error Connecting Client End Of The Socket."
+			   " Note: This Terminates The Client Program.\n");
 		exit(EXIT_FAILURE);
 	}
 	 
 	//Client / Server Initial Communication
 	if(handle_rembash(sockfd) == -1){
-		fputs("Error Validating Rembash Protocol\n", stderr);
+		perror("\nIn Function (Main), Error Completing Rembash Protocol."
+			   " Note: This Terminates The Client Program.\n");
 		exit(EXIT_FAILURE);
 	}
 	
 	//Setting TTY into Noncanonical Mode
 	if(start_noncanon() == -1){
-		fputs("Error Setting Terminal into Noncanonical Mode\n", stderr);
+		perror("\nIn Function (Main), Error Setting Client In Noncanonical Mode."
+			   " Note: This Terminates The Client Program.\n");
 		exit(EXIT_FAILURE);
 	}
 	
@@ -69,36 +73,40 @@ int main(int argc, char *argv[]){
 	switch(child_pid){
 		case 0:	//Read Commands from Terminal
 			if(socket_input(sockfd) == -1){
-				fputs("Error Reading Commands from the Terminal\n", stderr);
+				perror("\nIn Function (Main), Could Not Read Characters From User."
+					   " Note: This Terminates The Client Program.\n");
 				exit(EXIT_FAILURE);
 			}
 			exit(EXIT_SUCCESS);
 			
 		case -1: //Error Forking Child
-			fputs("Error Forking Child", stderr);
+			perror("\nIn Function (Main), Error Forking Subprocess."
+					   " Note: This Terminates The Client Program.\n");
 			exit(EXIT_FAILURE);
 			
 		default: //Output Bash Response to Terminal
 			if(socket_output(sockfd) == -1){
-				fputs("Error Reading from the Socket to STDOUT", stderr);
+				perror("\nIn Function (Main), Could Not Output Character To Terminal."
+					   " Note: This Terminates The Client Program.\n");
 				exit(EXIT_FAILURE);
 			}
 			
 			//Kill Child
-			if(kill(child_pid, SIGKILL) == -1){
-				fputs("Error Killing Child\n", stderr);
-			}
+			kill(child_pid, SIGKILL);
 			
 			//Collect Child
 			if(wait(NULL) == -1){
-				fputs("Error Collecting Child\n", stderr);
+				perror("\nIn Function (Main), Error Collecting Children."
+					   " Note: This Terminates The Client Program.\n");
 				exit(EXIT_FAILURE);
 			}
 	}
 	
 	//Restore TTY Attributes
 	if(reset_terminal() == -1){
-		fputs("Error Establishing Original Terminal Settings\n", stderr);
+		perror("\nIn Function (Main), Could Not Restore Terminal Settings."
+			   " Please Reset Or Close This Terminal For Proper Use."
+			   " Note: This Terminates The Client Program.\n");
 		exit(EXIT_FAILURE);
 	}
     exit(EXIT_SUCCESS);
@@ -111,8 +119,9 @@ int setup_socket(char *wanted_address){
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	
 	if(sockfd < 0){
-		fputs("Unable to Create the Socket from System Call\n", stderr);
-		exit(EXIT_FAILURE);
+		perror("\nIn Function (setup_socket), Error Connecting Client Socket"
+					   " To Wanted Address. Note: Error Exits Function.\n");
+		return -1;
 	}
 	
 	//Address Initialization
@@ -124,8 +133,9 @@ int setup_socket(char *wanted_address){
 	//Connects Socket with Specified Address
     int connect_result = connect(sockfd, (struct sockaddr *) &address, sizeof(address));
 	if(connect_result == -1){
-        fputs("Unable to Connect the Address with the Specified Socket\n", stderr);
-		exit(EXIT_FAILURE);
+        perror("\nIn Function (setup_socket), Error Connecting Client Socket End"
+					   " To The Server. Note: Error Exits Function.\n");
+		return -1;
     }
 	return sockfd;
 }
@@ -134,9 +144,13 @@ int setup_socket(char *wanted_address){
 int socket_input(int sockfd){
 	char c;
     while(read(STDIN_FILENO, &c, sizeof(c))) {
-		write(sockfd, &c, sizeof(c));
+		if(write(sockfd, &c, sizeof(c)) < 0){
+			perror("\nIn Function (socket_input), Error Writing Characters Read"
+					   " From User. Note: Error Exits Function.\n");
+		return -1;
+		}
     }
-	return EXIT_SUCCESS;
+	return 0;
 }
 
 
@@ -147,18 +161,20 @@ int socket_output(int sockfd){
 
 	//Memory Allocation Error Checking
 	if((read_buffer = malloc(sizeof(char) * MAX_BUFF)) == NULL){
-		fputs("Error Allocating Memory\n", stderr);
-		exit(EXIT_FAILURE);
+		perror("\nIn Function (socket_output), Error Allocating Memory To Hold"
+			   " Characters Read. Note: Error Exits Function.\n");
+		return -1;
 	}
 	
 	//Read from Socket to STDOUT
 	while((chars_read = read(sockfd, read_buffer, MAX_BUFF)) > 0){
 		if(write(STDOUT_FILENO, read_buffer, chars_read) < chars_read){
-			fputs("Incomplete Write: Missing Data\n", stderr);
-			exit(EXIT_FAILURE);
+			perror("\nIn Function (socket_output), Error Writing Characters Read"
+					" From PTY Master. Note: Error Exits Function.\n");
+			return -1;
 		}
 	}
-	return EXIT_SUCCESS;
+	return 0;
 }
 	
 
@@ -171,25 +187,32 @@ int handle_rembash(int sockfd){
 	char *message_buffer = readline(sockfd);
 	
 	if(strcmp(rembash_message, message_buffer) != 0){
-		fputs("Incorrect Protocol Name\n", stderr);
-		return EXIT_FAILURE;
+		perror("\nIn Function (handle_rembash), Incorrect Rembash Message."
+			   " Note: Error Exits Function.\n");
+		return -1;
 	}
 	
 	//Secret Message Send
 	int secret_length = strlen("<" SECRET ">\n");
     if(write(sockfd, "<" SECRET ">\n", secret_length) < secret_length){
-		fputs("Incomplete Write: Missing Data\n", stderr);
-		return EXIT_FAILURE;
+		perror("\nIn Function (handle_rembash), Incorrect Secret Message."
+			   " Note: Error Exits Function.\n");
+		return -1;
 	}
     
 	//Checks Secert Message Server Response
-	message_buffer = readline(sockfd);
+	if((message_buffer = readline(sockfd)) == NULL){
+		perror("\nIn Function (handle_rembash), Error Reading From Socket"
+			   " Note: Error Exits Function.\n");
+		return -1;
+	}
 	
     if(strcmp(ok_message, message_buffer) != 0){
-		fputs("Incorrect Secret Message\n", stderr);
-		return EXIT_FAILURE;
+		perror("\nIn Function (handle_rembash), Could Not Send OK Message"
+			   " Note: Error Exits Function.\n");
+		return -1;
 	}
-	return EXIT_SUCCESS;
+	return 0;
 }
 
 
@@ -200,8 +223,9 @@ int start_noncanon(){
 	
 	//Store Default TTY Settings
 	if(tcgetattr(STDIN_FILENO, &saved_attributes) == -1){
-		fputs("Error Saving Default Terminal Characteristics\n", stderr);
-		return EXIT_FAILURE;
+		perror("\nIn Function (start_noncanon), Could Not Save Terminal"
+			   " Attributes. Note: Error Exits Function.\n");
+		return -1;
 	}
 	
 	tcgetattr (STDIN_FILENO, &cbreak_attributes);
@@ -211,20 +235,22 @@ int start_noncanon(){
 	
 	//Connect Structure with Terminal
 	if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &cbreak_attributes) == -1){
-		fputs("Error Setting Terminal Attributes to Corresponding Terminal and File Descriptor\n", stderr);
-		return EXIT_FAILURE;
+		perror("\nIn Function (start_noncanon), Could Not Set Terminal"
+			   " Attributes. Note: Error Exits Function.\n");
+		return -1;
 	}
-	return EXIT_SUCCESS;
+	return 0;
 }
 
 
 int reset_terminal(){
 	//Connect Structure with Terminal
 	if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_attributes) == -1){
-		fputs("Error Setting Terminal Attributes to Corresponding Terminal and File Descriptor\n", stderr);
-		return EXIT_FAILURE;
+		perror("\nIn Function (start_noncanon), Could Not Restore Terminal"
+			   " Attributes. Note: Error Exits Function.\n");
+		return -1;
 	}
-	return EXIT_SUCCESS;
+	return 0;
 }
 
 
