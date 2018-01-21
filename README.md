@@ -25,3 +25,6 @@ Using this software requires access to a machine that runs a distribution of the
 ## Future Additions and Applications
 
 ## Contact
+Name: Andrew Cowden
+Phone: 815-592-5024
+Email: am.cowden.97@gmail.com
