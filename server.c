@@ -84,20 +84,16 @@ int create_timer();
 typedef enum {NEW, ESTABLISHED, UNWRITTEN, TERMINATED} Status;
 
 typedef struct client_t{
-	
 	char *unwritten;
 	int unwritten_num;
 	int client_fd;
 	int master_fd;
 	Status state;
-	
 } Client;
 
 typedef struct linked_list_t{
-	
 	Client* data;
 	struct linked_list_t *next;
-	
 } Linked_Memory;
 
 
@@ -110,7 +106,6 @@ Client **client_pairs;
 
 
 int main(){
-			
 	//Eliminate Need for Child Proccess Collection
 	if(signal(SIGCHLD, SIG_IGN) == SIG_ERR){
 		perror("\nIn Function (Main), Failed To Set Up SIGCHLD Signal To Be Ignored In" 
@@ -174,7 +169,6 @@ int main(){
 
 
 void handle_epoll(){
-	
 	int ready, source_fd;
 	struct epoll_event evlist[20];
 	
@@ -203,7 +197,6 @@ void handle_epoll(){
 
 
 void dispatch_operation(int source_fd){
-		
 	if(source_fd == server_fd){ //Accept Clients State
 		accept_clients(source_fd);
 		
@@ -236,7 +229,6 @@ void dispatch_operation(int source_fd){
 
 
 void accept_clients(int server_fd){
-	
 	struct sockaddr_in client_address;
     socklen_t client_len = sizeof(client_address);
 	int client_fd;
@@ -281,7 +273,6 @@ void accept_clients(int server_fd){
 
 
 void handle_timers(int timer_epoll_fd){
-	
 	int ready, source_fd;
 	struct epoll_event evlist[20];
 	
@@ -306,7 +297,6 @@ void handle_timers(int timer_epoll_fd){
 
 
 void verify_protocol(int client_fd){
-	
 	//Variables for Reading and Writing
 	char *message_buffer;
 	const char * const error_message = "<error>\n";
@@ -357,7 +347,6 @@ void verify_protocol(int client_fd){
 
 
 void transfer_data(int source_fd){
-	
 	static char read_buffer[MAX_BUFF]; 
 	int chars_read = 0, chars_written = 0;
 		
@@ -414,7 +403,6 @@ void transfer_data(int source_fd){
 
 
 void unwritten_data(int source_fd){
-	
 	int chars_read = client_pairs[source_fd]->unwritten_num, chars_written = 0;
 	
 	//Write to File Descriptor
@@ -460,7 +448,6 @@ void unwritten_data(int source_fd){
 
 
 void handle_bash(char *slave_name){
-
 	//Create New Session ID
 	if(setsid() == -1){
 		perror("\nIn Function (handle_bash), Error Setting Session ID In Order To"
@@ -500,7 +487,6 @@ void handle_bash(char *slave_name){
 
 
 void terminate_client(int client_fd, int master_fd, int mark_terminated){
-	
 	//Mark Client Object Terminated
 	if(mark_terminated){
 		client_pairs[client_fd]->state = TERMINATED;
@@ -522,7 +508,6 @@ void terminate_client(int client_fd, int master_fd, int mark_terminated){
 
 
 int create_socket(){
-	
 	//Listening Socket Constant
 	const int MAX_BACKLOG = 5;
 	
@@ -569,7 +554,6 @@ int create_socket(){
 
 
 int create_pty_pair(int client_fd, char *slave_name){
-	
 	//Variable to Hold Slave and Master fd and name
 	char *slave_temp;
 	int master_fd;
@@ -626,7 +610,6 @@ int create_pty_pair(int client_fd, char *slave_name){
 
 
 int init_client(int client_fd){
-	
 	int master_fd;
 	char slave_name[MAX_BUFF];
 	
@@ -675,7 +658,6 @@ int init_client(int client_fd){
 
 
 int init_client_obj(int client_fd){
-	
 	//Create Client Object
 	if((client_pairs[client_fd] = malloc(sizeof(Client))) == NULL){
 		perror("\nIn Function (init_client_obj), Error Allocating Memory To Hold"
@@ -692,7 +674,6 @@ int init_client_obj(int client_fd){
 
 
 int send_protocol(int client_fd){
-	
 	const char * const rembash_message = "<rembash>\n";
 	
 	//Rembash Send
@@ -730,7 +711,6 @@ int send_protocol(int client_fd){
 
 
 int add_to_epoll(int source_fd){
-	
 	//Add Client Socket and Master PTY File Descriptors to Epoll
 	struct epoll_event ev;
 	ev.events = EPOLLIN | EPOLLONESHOT;
@@ -746,7 +726,6 @@ int add_to_epoll(int source_fd){
 
 
 int rearm_epoll(int source_fd, int in_or_out){
-
 	struct epoll_event ev;
 	ev.data.fd = source_fd;
 	
@@ -771,7 +750,6 @@ int rearm_epoll(int source_fd, int in_or_out){
 
 
 int create_timer(){
-	
 	struct itimerspec time_specs;
 	int timer_fd;
 	
