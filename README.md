@@ -18,7 +18,13 @@ Using this software requires access to a machine that runs a distribution of the
    
   
 * Terminals and Psuedoterminals
+
+   To allow complete functionality of the Bash terminal once connected to the remote machine, the psuedoterminal and terminal connection must be specified and implemented in the application. After termination of the client, the initial pseduoterminal settings are restored. 
+   
 * Thread Pool
+
+    The primary way that clients are polled and efficiently handled is through the use of the Linux Epoll API in combination with a thread pool. A thread pool acts as a concurrency tool that takes a task queue that can lock and unlock in order to distribute jobs to N number of threads. The current implementation takes in the total number of processors that the host machine uses as the basis for the number of worker threads. 
+    
 * File Descriptor Timers
 * Partial Writes
 
