@@ -15,12 +15,9 @@
 #define PORT 4070
 #define SECRET "cs407rembash"
 
-//Global Variables to Use with Signals and Lengths
+//Global Variable to Restablish Terminal Settings
 struct termios saved_attributes;
 
-
-int main(int argc, char *argv[]){
-	
 	//Function Prototypes
 	void sigchild_handler(int sig);
 	int handle_rembash(int sockfd);
@@ -29,7 +26,8 @@ int main(int argc, char *argv[]){
 	int socket_output(int sockfd);
 	int start_noncanon();
 	int reset_terminal();
-	
+
+int main(int argc, char *argv[]){
 	//Command Line Argument Validation
 	if(argc != 2){
 		perror("\nIn Function (Main), Incorrect Number of Arguments. NOTE: This"
@@ -46,7 +44,7 @@ int main(int argc, char *argv[]){
 		exit(EXIT_FAILURE);
 	}
 	 
-	//Client / Server Initial Communication
+	//Client/Server Initial Communication
 	if(handle_rembash(sockfd) == -1){
 		perror("\nIn Function (Main), Error Completing Rembash Protocol."
 			   " Note: This Terminates The Client Program.\n");
@@ -67,7 +65,7 @@ int main(int argc, char *argv[]){
 	sigemptyset(&response.sa_mask);
 	sigaction(SIGCHLD, &response, NULL);
 	
-	//Forking for Reading and Writing Loops
+	//Forking for Reading and Writing to Socket
 	int child_pid = fork();
 
 	switch(child_pid){
